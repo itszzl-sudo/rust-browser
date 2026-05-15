@@ -1,0 +1,66 @@
+[package]
+name = "rust-browser"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rust Browser Team"]
+description = "A browser engine built with obscura, taffy and tiny-skia"
+
+[[bin]]
+name = "rust_browser"
+path = "src/main.rs"
+
+[dependencies]
+# CSS Layout Engine
+taffy = "0.4"
+
+# 2D Graphics Rendering
+tiny-skia = "0.11"
+
+# Text rendering
+cosmic-text = "0.11"
+
+# Obscura crates
+obscura-net = { path = "../obscura/crates/obscura-net" }
+obscura-dom = { path = "../obscura/crates/obscura-dom" }
+
+# GUI Window
+eframe = "0.31"
+egui = "0.31"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# JavaScript engine (暂时禁用，Windows 编译需要 patch 工具)
+# rquickjs = "0.6"
+
+# CSS parsing
+cssparser = "0.31"
+selectors = "0.26"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Thread-safe reference
+parking_lot = "0.12"
+
+# Async
+futures = "0.3"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# URL handling
+url = "2.5"
+
+# Image processing
+image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

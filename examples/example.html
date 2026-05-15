@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rust Browser 示例</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5rem;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        
+        h2 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        
+        p {
+            color: #666;
+            line-height: 1.6;
+        }
+        
+        .button {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            margin-top: 10px;
+        }
+        
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .feature {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+        }
+        
+        .feature-icon {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+        
+        footer {
+            text-align: center;
+            color: rgba(255,255,255,0.8);
+            margin-top: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎉 Rust Browser</h1>
+        
+        <div class="card">
+            <h2>欢迎使用 Rust Browser</h2>
+            <p>这是一个基于 Rust 技术栈的现代浏览器引擎，使用了以下核心技术：</p>
+            
+            <div class="features">
+                <div class="feature">
+                    <div class="feature-icon">📐</div>
+                    <h3>Taffy</h3>
+                    <p>高性能 CSS 布局引擎</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🎨</div>
+                    <h3>tiny-skia</h3>
+                    <p>轻量级 2D 渲染库</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🌐</div>
+                    <h3>Obscura</h3>
+                    <p>无头浏览器引擎</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>为什么选择 Rust Browser？</h2>
+            <p>Rust Browser 提供了出色的性能和安全性：</p>
+            <ul style="margin: 15px 0; padding-left: 20px;">
+                <li>⚡ 极致的渲染性能</li>
+                <li>🔒 内存安全保证</li>
+                <li>📦 轻量级二进制文件</li>
+                <li>🎯 跨平台支持</li>
+            </ul>
+            <a href="#" class="button">了解更多</a>
+        </div>
+        
+        <footer>
+            <p>Built with ❤️ using Rust</p>
+            <p>© 2026 Rust Browser Team</p>
+        </footer>
+    </div>
+</body>
+</html>

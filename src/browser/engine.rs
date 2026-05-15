@@ -1,0 +1,257 @@
+//! 浏览器引擎 - 核心浏览器功能实现
+//!
+//! 使用 obscura-net, obscura-dom, Taffy 布局和 tiny-skia 渲染
+
+use crate::{css::stylesheet::Stylesheet, renderer::Renderer, NetworkClient, DomWrapper};
+use log::{debug, info, warn};
+use std::collections::HashMap;
+use std::path::Path;
+use tokio::runtime::Runtime;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum BrowserError {
+    #[error("初始化失败: {0}")]
+    InitError(String),
+    #[error("导航失败: {0}")]
+    NavigationError(String),
+    #[error("渲染失败: {0}")]
+    RenderError(String),
+    #[error("页面未加载")]
+    PageNotLoaded,
+    #[error("网络请求失败: {0}")]
+    NetworkError(String),
+}
+
+/// 页面文档（使用 obscura-dom）
+#[derive(Clone)]
+pub struct Document {
+    /// HTML 内容
+    pub html: String,
+    /// DOM 树 (obscura-dom)
+    pub dom: DomWrapper,
+    /// 标题
+    pub title: Option<String>,
+    /// URL
+    pub url: String,
+}
+
+impl std::fmt::Debug for Document {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Document")
+            .field("html", &format!("{} bytes", self.html.len()))
+            .field("title", &self.title)
+            .field("url", &self.url)
+            .finish()
+    }
+}
+
+impl Document {
+    /// 从 HTML 创建文档
+    pub fn from_html(html: &str, url: &str) -> Self {
+        // 使用 obscura-dom 解析
+        let dom = DomWrapper::from_html(html, Some(url));
+        // 从 DOM 提取标题
+        let title = dom.title();
+
+        Self {
+            html: html.to_string(),
+            dom,
+            title,
+            url: url.to_string(),
+        }
+    }
+
+    /// 获取 DOM 树引用
+    pub fn get_dom(&self) -> &DomWrapper {
+        &self.dom
+    }
+}
+
+/// 浏览器引擎
+///
+/// 整合 obscura-net, obscura-dom, Taffy 和 tiny-skia
+pub struct BrowserEngine {
+    /// 渲染器
+    renderer: Renderer,
+    /// 当前文档
+    document: Option<Document>,
+    /// 视口宽度
+    width: u32,
+    /// 视口高度
+    height: u32,
+    /// 页面标题
+    title: Option<String>,
+    /// 当前 URL
+    current_url: Option<String>,
+    /// 已加载的样式表
+    stylesheets: HashMap<String, Stylesheet>,
+    /// 网络客户端
+    network_client: NetworkClient,
+    /// Tokio 运行时（用于异步请求）
+    rt: Runtime,
+}
+
+impl BrowserEngine {
+    /// 创建新的浏览器引擎
+    pub fn new(width: u32, height: u32) -> Result<Self, BrowserError> {
+        info!("初始化浏览器引擎 ({}x{})", width, height);
+
+        let renderer = Renderer::new(width, height);
+        let network_client = NetworkClient::new();
+        let rt = Runtime::new()
+            .map_err(|e| BrowserError::InitError(format!("无法创建 Tokio 运行时: {}", e)))?;
+
+        Ok(Self {
+            renderer,
+            document: None,
+            width,
+            height,
+            title: None,
+            current_url: None,
+            stylesheets: HashMap::new(),
+            network_client,
+            rt,
+        })
+    }
+
+    /// 导航到指定 URL
+    pub fn navigate(&mut self, url: &str) -> Result<(), BrowserError> {
+        info!("导航到: {}", url);
+
+        // 检查是否是本地文件
+        if url.starts_with("file://") || url.ends_with(".html") || url.ends_with(".htm") {
+            return self.load_local_file(url);
+        }
+
+        // 使用 obscura-net 发起网络请求
+        let html = self.rt.block_on(self.network_client.fetch_html(url))
+            .map_err(|e| BrowserError::NetworkError(e.to_string()))?;
+        
+        let doc = Document::from_html(&html, url);
+        self.document = Some(doc);
+        self.current_url = Some(url.to_string());
+        self.title = self.document.as_ref().and_then(|d| d.title.clone());
+        info!("页面加载成功");
+        Ok(())
+    }
+
+    /// 加载本地文件
+    fn load_local_file(&mut self, path: &str) -> Result<(), BrowserError> {
+        let path = path.trim_start_matches("file://");
+        
+        match std::fs::read_to_string(path) {
+            Ok(html) => {
+                let doc = Document::from_html(&html, path);
+                self.document = Some(doc);
+                self.current_url = Some(path.to_string());
+                self.title = self.document.as_ref().and_then(|d| d.title.clone());
+                info!("本地文件加载成功");
+                Ok(())
+            }
+            Err(e) => {
+                // 创建空白页面
+                let blank_html = r#"<!DOCTYPE html>
+<html>
+<head><title>空白页面</title></head>
+<body style="background: white; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+    <h1 style="color: #333;">空白页面</h1>
+</body>
+</html>"#;
+                let doc = Document::from_html(blank_html, "about:blank");
+                self.document = Some(doc);
+                self.current_url = Some("about:blank".to_string());
+                self.title = Some("空白页面".to_string());
+                warn!("文件加载失败: {}，显示空白页面", e);
+                Ok(())
+            }
+        }
+    }
+
+    /// 获取页面标题
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// 获取当前 URL
+    pub fn url(&self) -> &str {
+        self.current_url.as_deref().unwrap_or("about:blank")
+    }
+
+    /// 获取视口尺寸
+    pub fn viewport(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// 设置视口尺寸
+    pub fn set_viewport(&mut self, width: u32, height: u32) {
+        debug!("设置视口: {}x{}", width, height);
+        self.width = width;
+        self.height = height;
+        self.renderer.set_viewport(width, height);
+    }
+
+    /// 获取 DOM 树
+    pub fn dom(&self) -> Option<&Document> {
+        self.document.as_ref()
+    }
+
+    /// 添加样式表
+    pub fn add_stylesheet(&mut self, url: &str, css: &str) {
+        debug!("添加样式表: {}", url);
+        let stylesheet = Stylesheet::parse(css).unwrap_or_default();
+        self.stylesheets.insert(url.to_string(), stylesheet);
+    }
+
+    /// 渲染页面到图像
+    pub fn render_to_image(&mut self) -> Result<Vec<u8>, BrowserError> {
+        if self.document.is_none() {
+            return Err(BrowserError::PageNotLoaded);
+        }
+
+        // 使用 tiny-skia 渲染
+        self.renderer
+            .render(&self.document)
+            .map_err(|e| BrowserError::RenderError(e.to_string()))
+    }
+
+    /// 保存截图
+    pub fn screenshot(&mut self, path: &Path) -> Result<(), BrowserError> {
+        let image_data = self.render_to_image()?;
+        
+        // 保存为 PNG
+        let img = image::load_from_memory(&image_data)
+            .map_err(|e| BrowserError::RenderError(e.to_string()))?;
+        
+        img.save(path)
+            .map_err(|e| BrowserError::RenderError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// 执行 JavaScript（模拟返回）
+    pub fn execute_js(&self, _script: &str) -> Result<String, BrowserError> {
+        if self.document.is_none() {
+            return Err(BrowserError::PageNotLoaded);
+        }
+        // 简单的 JS 执行模拟
+        Ok("undefined".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_browser_creation() {
+        let browser = BrowserEngine::new(800, 600);
+        assert!(browser.is_ok());
+    }
+
+    #[test]
+    fn test_viewport() {
+        let browser = BrowserEngine::new(800, 600).unwrap();
+        assert_eq!(browser.viewport(), (800, 600));
+    }
+}
