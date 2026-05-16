@@ -50,6 +50,7 @@ impl Renderer {
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         debug!("设置视口: {}x{}", width, height);
         self.context.set_viewport(width, height);
+        self.painter.set_viewport(width, height);
     }
 
     pub fn render(&mut self, document: &Option<Document>) -> Result<Vec<u8>, RenderError> {

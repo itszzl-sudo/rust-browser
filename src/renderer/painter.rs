@@ -77,4 +77,11 @@ impl Painter {
         self.pixmap.save_png(path)?;
         Ok(())
     }
+
+    pub fn set_viewport(&mut self, width: u32, height: u32) {
+        if let Some(new_pixmap) = Pixmap::new(width, height) {
+            debug!("更新绘制器视口: {}x{}", width, height);
+            self.pixmap = new_pixmap;
+        }
+    }
 }
