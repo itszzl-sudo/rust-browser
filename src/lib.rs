@@ -23,22 +23,26 @@
 //! ```
 
 pub mod browser;
+pub mod browser_process;
 pub mod css;
-pub mod renderer;
-pub mod network;
 pub mod dom_wrapper;
+pub mod mojo;
+pub mod network;
+pub mod renderer;
+pub mod renderer_process;
+pub mod task_queue;
 
 pub mod html;
 
 #[allow(deprecated)]
 pub mod dom;
 
-pub use browser::{Browser, BrowserEngine, Document, BrowserError, DEFAULT_HOME_URL};
+pub use browser::{Browser, BrowserEngine, BrowserError, Document, DEFAULT_HOME_URL};
 pub use browser::{Tab, TabManager};
 pub use css::values::Color;
 #[allow(deprecated)]
 pub use dom::node::DomTree;
-pub use html::parser::HtmlParser;
-pub use renderer::Renderer;
-pub use network::NetworkClient;
 pub use dom_wrapper::DomWrapper;
+pub use html::parser::HtmlParser;
+pub use network::NetworkClient;
+pub use renderer::Renderer;

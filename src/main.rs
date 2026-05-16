@@ -1,14 +1,21 @@
 //! Rust Browser - 主程序入口
 //!
-//! 基于 egui 的图形化浏览器
+//! Chrome 多进程架构浏览器
+//! - Browser Process (主线程/UI)
+//! - Renderer Processes (每个标签页独立线程)
+//! - Mojo IPC 通信
+//! - Task Queue 任务调度
 
 use clap::Parser;
 use eframe::egui;
-use rust_browser::Browser;
+use log::{error, info};
+use rust_browser::browser_process::host::BrowserProcessHost;
+use rust_browser::browser_process::interfaces::{InputEvent, RenderResultMessage};
+use rust_browser::task_queue::task::TaskTraits;
+use rust_browser::task_queue::GLOBAL_SCHEDULER;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
-use log::{info, error};
 
 // 全局日志消息
 static LOG_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -23,7 +30,10 @@ fn add_log_message(msg: String) {
 }
 
 fn get_log_messages() -> Vec<String> {
-    LOG_MESSAGES.lock().map(|logs| logs.clone()).unwrap_or_default()
+    LOG_MESSAGES
+        .lock()
+        .map(|logs| logs.clone())
+        .unwrap_or_default()
 }
 
 const DEFAULT_URL: &str = "https://www.baidu.com";
@@ -48,49 +58,64 @@ struct Args {
     debug: bool,
 }
 
+/// Chrome 风格的多进程浏览器应用
 struct BrowserApp {
-    browser: Option<Browser>,
+    /// 浏览器进程宿主（管理渲染器进程）
+    browser_host: Option<BrowserProcessHost>,
+    /// 当前活跃渲染器 ID
+    active_renderer_id: Option<u64>,
+    /// URL 输入框内容
     url_input: String,
+    /// 渲染的页面图像
     image_data: Option<egui::ColorImage>,
+    /// 错误信息
     error_message: Option<String>,
+    /// 初始 URL
     initial_url: String,
+    /// 是否正在加载
     is_loading: bool,
+    /// 首帧标记
     first_frame: bool,
+    /// 加载开始时间
     load_start_time: Option<Instant>,
+    /// 待自动加载
     auto_load_pending: bool,
+    /// 视口尺寸
+    width: u32,
+    height: u32,
 }
 
 impl BrowserApp {
     fn new(initial_url: String, width: u32, height: u32) -> Self {
-        add_log_message("正在初始化浏览器...".to_string());
+        add_log_message("=== Rust Browser (Chrome 多进程架构) ===".to_string());
+        add_log_message("正在初始化浏览器进程...".to_string());
 
-        let browser = match Browser::new() {
-            Ok(b) => {
-                add_log_message("浏览器创建成功".to_string());
-                Some(b.with_viewport(width, height))
+        // 初始化全局 TaskQueue 调度器
+        let _ = &*GLOBAL_SCHEDULER;
+        add_log_message("TaskQueue 调度器已启动".to_string());
+
+        // 创建浏览器进程宿主
+        let mut browser_host = BrowserProcessHost::new();
+
+        // 启动渲染器进程（通过 IPC）
+        add_log_message(format!("创建默认渲染器进程: {}", initial_url));
+        let renderer_id = match browser_host.spawn_renderer(&initial_url, width, height) {
+            Ok(id) => {
+                add_log_message(format!("渲染器进程 #{} 已创建", id));
+                Some(id)
             }
             Err(e) => {
-                let err_msg = format!("创建浏览器失败: {}", e);
-                add_log_message(err_msg.clone());
-                eprintln!("{}", err_msg);
-                return Self {
-                    browser: None,
-                    url_input: initial_url.clone(),
-                    image_data: None,
-                    error_message: Some(err_msg),
-                    initial_url,
-                    is_loading: false,
-                    first_frame: true,
-                    load_start_time: None,
-                    auto_load_pending: false,
-                };
+                let err = format!("创建渲染器失败: {}", e);
+                add_log_message(err);
+                None
             }
         };
 
         add_log_message(format!("窗口尺寸: {}x{}", width, height));
 
         Self {
-            browser,
+            browser_host: Some(browser_host),
+            active_renderer_id: renderer_id,
             url_input: initial_url.clone(),
             image_data: None,
             error_message: None,
@@ -99,111 +124,137 @@ impl BrowserApp {
             first_frame: true,
             load_start_time: None,
             auto_load_pending: true,
+            width,
+            height,
         }
     }
 
-    fn refresh_image(&mut self) {
-        if let Some(browser) = self.browser.as_mut() {
-            add_log_message("正在渲染页面...".to_string());
-            match browser.render_full() {
-                Ok(png_data) => {
-                    add_log_message("渲染成功，正在加载图像...".to_string());
-                    match image::load_from_memory(&png_data) {
-                        Ok(img) => {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = rgba.dimensions();
-                            let pixels: Vec<u8> = rgba.into_raw();
-                            self.image_data = Some(egui::ColorImage::from_rgba_unmultiplied(
-                                [w as usize, h as usize],
-                                &pixels,
-                            ));
-                            self.error_message = None;
-                            add_log_message(format!("图像加载成功: {}x{}", w, h));
-                        }
-                        Err(e) => {
-                            let err = format!("图像解析失败: {}", e);
-                            add_log_message(err.clone());
-                            self.error_message = Some(err);
+    /// 通过 IPC 从渲染器进程获取最新帧
+    fn refresh_from_renderer(&mut self) {
+        if let Some(ref mut host) = self.browser_host {
+            // 从 Mojo IPC 管道接收渲染结果
+            if let Some(result) = host.try_receive_result() {
+                add_log_message(format!("收到渲染帧: {}x{}", result.width, result.height));
+
+                match image::load_from_memory(&result.png_data) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        let pixels: Vec<u8> = rgba.into_raw();
+                        self.image_data = Some(egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            &pixels,
+                        ));
+                        self.error_message = None;
+                        if let Some(ref title) = result.title {
+                            add_log_message(format!("页面标题: {}", title));
                         }
                     }
-                }
-                Err(e) => {
-                    let err = format!("渲染失败: {}", e);
-                    add_log_message(err.clone());
-                    self.error_message = Some(err);
+                    Err(e) => {
+                        let err = format!("图像解析失败: {}", e);
+                        self.error_message = Some(err.clone());
+                        add_log_message(err);
+                    }
                 }
             }
         }
     }
 
     fn navigate(&mut self, url: &str) {
-        add_log_message(format!("正在导航到: {}", url));
+        add_log_message(format!("Mojo IPC 导航到: {}", url));
         self.is_loading = true;
         self.error_message = None;
         self.load_start_time = Some(Instant::now());
 
-        if let Some(browser) = self.browser.as_mut() {
-            match browser.navigate(url) {
+        if let Some(ref host) = self.browser_host {
+            match host.navigate(url) {
                 Ok(_) => {
                     self.url_input = url.to_string();
-                    add_log_message("导航成功，正在刷新图像...".to_string());
-                    self.refresh_image();
+                    add_log_message("导航消息已通过 IPC 发送到渲染器".to_string());
+
+                    // 通过 TaskQueue 延迟等待渲染结果
+                    let scheduler = &*GLOBAL_SCHEDULER;
+                    let poll_interval = std::time::Duration::from_millis(100);
+                    let start = Instant::now();
+
+                    // 轮询等待渲染结果（最多 10 秒）
+                    while start.elapsed().as_secs() < LOAD_TIMEOUT_SECS {
+                        // 在浏览器进程中运行 main thread 任务
+                        scheduler.run_main_tasks();
+
+                        // 使用 host 的可变引用接收结果
+                        // （通过内部可变性处理）
+                        if let Some(ref mut host) = self.browser_host {
+                            if let Some(result) = host.try_receive_result() {
+                                add_log_message("通过 IPC 接收到渲染结果".to_string());
+                                match image::load_from_memory(&result.png_data) {
+                                    Ok(img) => {
+                                        let rgba = img.to_rgba8();
+                                        let (w, h) = rgba.dimensions();
+                                        let pixels: Vec<u8> = rgba.into_raw();
+                                        self.image_data =
+                                            Some(egui::ColorImage::from_rgba_unmultiplied(
+                                                [w as usize, h as usize],
+                                                &pixels,
+                                            ));
+                                        self.error_message = None;
+                                        if let Some(ref title) = result.title {
+                                            add_log_message(format!("页面标题: {}", title));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.error_message = Some(format!("图像解析失败: {}", e));
+                                    }
+                                }
+                                self.is_loading = false;
+                                return;
+                            }
+                        }
+
+                        std::thread::sleep(poll_interval);
+                    }
+
+                    add_log_message("导航超时：渲染器未返回结果".to_string());
+                    self.error_message = Some("页面加载超时".to_string());
                     self.is_loading = false;
                 }
                 Err(e) => {
-                    let err = format!("导航失败: {}", e);
+                    let err = format!("导航 IPC 发送失败: {}", e);
                     add_log_message(err.clone());
                     self.error_message = Some(err);
                     self.is_loading = false;
                 }
             }
         } else {
-            add_log_message("错误: 浏览器未初始化".to_string());
+            add_log_message("错误: 浏览器进程未初始化".to_string());
             self.is_loading = false;
-        }
-    }
-
-    fn go_back(&mut self) {
-        if let Some(browser) = self.browser.as_mut() {
-            if let Some(url) = browser.go_back() {
-                self.navigate(&url);
-            }
-        }
-    }
-
-    fn go_forward(&mut self) {
-        if let Some(browser) = self.browser.as_mut() {
-            if let Some(url) = browser.go_forward() {
-                self.navigate(&url);
-            }
-        }
-    }
-
-    fn reload(&mut self) {
-        if let Some(browser) = self.browser.as_ref() {
-            if let Some(url) = browser.reload() {
-                self.navigate(&url);
-            }
         }
     }
 }
 
 impl eframe::App for BrowserApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 首帧初始化
         if self.first_frame {
             self.first_frame = false;
             add_log_message("窗口已显示".to_string());
-            add_log_message(format!("将在 {} 秒后自动加载: {}", LOAD_TIMEOUT_SECS, self.initial_url));
+            add_log_message(format!(
+                "将在 {} 秒后自动加载: {}",
+                LOAD_TIMEOUT_SECS, self.initial_url
+            ));
             self.load_start_time = Some(Instant::now());
-            info!("首帧渲染完成，窗口应该已显示");
-            self.refresh_image();
+            info!("首帧渲染完成，窗口已显示");
+
+            // 立即尝试接收首次渲染结果
+            self.refresh_from_renderer();
         }
 
+        // 自动加载
         if self.auto_load_pending {
             if let Some(start_time) = self.load_start_time {
                 let elapsed = start_time.elapsed().as_secs();
                 if elapsed >= LOAD_TIMEOUT_SECS {
-                    add_log_message("开始加载网页...".to_string());
+                    add_log_message("自动加载触发...".to_string());
                     self.auto_load_pending = false;
                     let url_to_load = self.initial_url.clone();
                     self.navigate(&url_to_load);
@@ -211,21 +262,29 @@ impl eframe::App for BrowserApp {
             }
         }
 
+        // 加载超时处理
         if self.is_loading {
             if let Some(start_time) = self.load_start_time {
                 let elapsed = start_time.elapsed().as_secs();
                 if elapsed >= LOAD_TIMEOUT_SECS {
-                    add_log_message("加载超时！网络请求超过5秒".to_string());
+                    add_log_message("加载超时！".to_string());
                     self.is_loading = false;
                     self.error_message = Some("网络连接超时，请检查网络后重试".to_string());
                 }
             }
+
+            // 加载中仍然尝试接收渲染结果
+            self.refresh_from_renderer();
         }
+
+        // 在每一帧运行 TaskQueue 的 main thread 任务
+        GLOBAL_SCHEDULER.run_main_tasks();
 
         ctx.set_visuals(egui::Visuals::dark());
 
+        // 日志面板
         egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| {
-            ui.heading("Logs");
+            ui.heading("Chrome 多进程 IPC 日志");
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
@@ -237,6 +296,7 @@ impl eframe::App for BrowserApp {
                 });
         });
 
+        // 中央面板 - 页面显示区域
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.set_min_size(egui::vec2(800.0, 600.0));
 
@@ -256,46 +316,63 @@ impl eframe::App for BrowserApp {
                 });
             } else if self.auto_load_pending || self.is_loading {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Initializing...");
+                    ui.label("Rust Browser (Chrome 架构) - 初始化中...");
                 });
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Enter URL and click Go");
+                    ui.label("Rust Browser (Chrome 架构)");
                 });
             }
+
+            // 显示架构信息
+            ui.horizontal(|ui| {
+                ui.label("架构:");
+                ui.colored_label(
+                    egui::Color32::GREEN,
+                    format!(
+                        "BrowserProcess(1) ↔ RendererProcess({}) via Mojo IPC | TaskQueue({} threads)",
+                        self.browser_host
+                            .as_ref()
+                            .map(|h| h.renderer_count())
+                            .unwrap_or(0),
+                        std::thread::available_parallelism()
+                            .map(|n| n.get())
+                            .unwrap_or(4),
+                    ),
+                );
+            });
         });
     }
 }
 
 fn run_screenshot_mode(args: &Args) -> Result<(), String> {
-    println!("Rust Browser 截图模式");
+    println!("Rust Browser (Chrome 架构) 截图模式");
     println!("目标 URL: {}", args.url);
 
-    let mut browser = Browser::new().map_err(|e| format!("创建浏览器失败: {}", e))?;
-    browser = browser.with_viewport(args.width, args.height);
+    let mut host = BrowserProcessHost::new();
+    let renderer_id = host.spawn_renderer(&args.url, args.width, args.height)?;
+    println!("✓ 渲染器进程 #{} 已启动", renderer_id);
 
-    match browser.navigate(&args.url) {
-        Ok(_) => println!("✓ 页面加载成功"),
-        Err(e) => {
-            eprintln!("✗ 页面加载失败: {}", e);
-            return Err(format!("页面加载失败: {}", e));
-        }
-    }
+    // 等待渲染结果
+    let start = Instant::now();
+    loop {
+        if let Some(result) = host.try_receive_result() {
+            println!("✓ 收到渲染帧: {}x{}", result.width, result.height);
 
-    if let Some(output_path) = &args.output {
-        println!("正在保存截图到: {:?}", output_path);
-        match browser.screenshot(output_path) {
-            Ok(_) => {
+            if let Some(output_path) = &args.output {
+                println!("正在保存截图到: {:?}", output_path);
+                std::fs::write(output_path, &result.png_data)
+                    .map_err(|e| format!("保存文件失败: {}", e))?;
                 println!("✓ 截图保存成功");
-                Ok(())
             }
-            Err(e) => {
-                eprintln!("✗ 截图保存失败: {}", e);
-                Err(format!("截图保存失败: {}", e))
-            }
+            return Ok(());
         }
-    } else {
-        Ok(())
+
+        if start.elapsed().as_secs() > 30 {
+            return Err("等待渲染结果超时".to_string());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -305,8 +382,15 @@ fn main() -> Result<(), eframe::Error> {
         .format_timestamp_secs()
         .init();
 
-    info!("Rust Browser 启动");
-    add_log_message("Rust Browser 启动".to_string());
+    info!("Rust Browser (Chrome 多进程架构) 启动");
+    add_log_message("Rust Browser (Chrome 多进程架构) 启动".to_string());
+
+    // 打印架构启动信息
+    add_log_message("─".repeat(50));
+    add_log_message("进程模型: BrowserProcess + RendererProcess (多线程)".to_string());
+    add_log_message("IPC 协议: Mojo 风格 MessagePipe + Interface Binding".to_string());
+    add_log_message("任务调度: TaskQueue (Work-Stealing ThreadPool)".to_string());
+    add_log_message("─".repeat(50));
 
     // 解析命令行参数
     let args = Args::parse();
@@ -321,13 +405,12 @@ fn main() -> Result<(), eframe::Error> {
 
     // 窗口模式
     add_log_message("进入窗口模式".to_string());
-    println!("Rust Browser 窗口模式");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([args.width as f32, args.height as f32])
             .with_min_inner_size([400.0, 300.0])
-            .with_title("Rust Browser")
+            .with_title("Rust Browser (Chrome 架构)")
             .with_resizable(true)
             .with_maximized(false)
             .with_visible(true),
@@ -338,41 +421,40 @@ fn main() -> Result<(), eframe::Error> {
     add_log_message(format!("窗口尺寸: {}x{}", args.width, args.height));
 
     let app = BrowserApp::new(args.url, args.width, args.height);
-    
+
     add_log_message("正在创建窗口...".to_string());
     info!("开始运行 eframe::run_native");
-    
+
     let result = eframe::run_native(
-        "Rust Browser",
+        "Rust Browser (Chrome 架构)",
         options,
         Box::new(|cc| {
             let mut fonts = egui::FontDefinitions::default();
-            
+
             fonts.font_data.insert(
                 "china_font".to_owned(),
-                egui::FontData::from_static(include_bytes!("C:/Windows/Fonts/msyh.ttc"))
-                    .into(),
+                egui::FontData::from_static(include_bytes!("C:/Windows/Fonts/msyh.ttc")).into(),
             );
-            
+
             fonts
                 .families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
                 .insert(0, "china_font".to_owned());
-            
+
             fonts
                 .families
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
                 .push("china_font".to_owned());
-            
+
             cc.egui_ctx.set_fonts(fonts);
             info!("中文字体已加载");
-            
+
             Ok(Box::new(app))
         }),
     );
-    
+
     if let Err(e) = result {
         error!("窗口运行失败: {}", e);
         eprintln!("窗口运行失败: {}", e);

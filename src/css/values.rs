@@ -103,7 +103,7 @@ impl Length {
             LengthUnit::Percent => self.value * reference / 100.0,
             LengthUnit::Vw => self.value * reference / 100.0, // 简化处理
             LengthUnit::Vh => self.value * reference / 100.0, // 简化处理
-            LengthUnit::Pt => self.value * 1.333,              // 1pt = 1.333px
+            LengthUnit::Pt => self.value * 1.333,             // 1pt = 1.333px
             LengthUnit::Cm => self.value * 37.795,            // 1cm = 37.795px
             LengthUnit::Mm => self.value * 3.7795,            // 1mm = 3.7795px
             LengthUnit::In => self.value * 96.0,              // 1in = 96px
@@ -184,7 +184,34 @@ impl Color {
     /// 从名称创建（使用缓存优化）
     pub fn from_name(name: &str) -> Option<Self> {
         let name_lower = name.to_lowercase();
-        get_color_name_cache().get(name_lower.as_str()).copied()
+        // 基本命名颜色
+        match name_lower.as_str() {
+            "black" => Some(Self::BLACK),
+            "white" => Some(Self::WHITE),
+            "red" => Some(Self::RED),
+            "green" => Some(Self::GREEN),
+            "blue" => Some(Self::BLUE),
+            "yellow" => Some(Self::YELLOW),
+            "cyan" => Some(Self::CYAN),
+            "magenta" => Some(Self::MAGENTA),
+            "transparent" => Some(Self::TRANSPARENT),
+            "gray" | "grey" => Some(Color::rgb(128, 128, 128)),
+            "darkgray" | "darkgrey" => Some(Color::rgb(169, 169, 169)),
+            "lightgray" | "lightgrey" => Some(Color::rgb(211, 211, 211)),
+            "silver" => Some(Color::rgb(192, 192, 192)),
+            "maroon" => Some(Color::rgb(128, 0, 0)),
+            "purple" => Some(Color::rgb(128, 0, 128)),
+            "fuchsia" => Some(Color::rgb(255, 0, 255)),
+            "lime" => Some(Color::rgb(0, 255, 0)),
+            "olive" => Some(Color::rgb(128, 128, 0)),
+            "navy" => Some(Color::rgb(0, 0, 128)),
+            "teal" => Some(Color::rgb(0, 128, 128)),
+            "aqua" => Some(Color::rgb(0, 255, 255)),
+            "orange" => Some(Color::rgb(255, 165, 0)),
+            "brown" => Some(Color::rgb(165, 42, 42)),
+            "coral" => Some(Color::rgb(255, 127, 80)),
+            _ => None,
+        }
     }
 
     /// 转换为 RGBA 数组
@@ -202,15 +229,60 @@ impl Color {
     }
 
     // 预定义颜色
-    pub const BLACK: Self = Self { r: 0, g: 0, b: 0, a: 255 };
-    pub const WHITE: Self = Self { r: 255, g: 255, b: 255, a: 255 };
-    pub const RED: Self = Self { r: 255, g: 0, b: 0, a: 255 };
-    pub const GREEN: Self = Self { r: 0, g: 128, b: 0, a: 255 };
-    pub const BLUE: Self = Self { r: 0, g: 0, b: 255, a: 255 };
-    pub const YELLOW: Self = Self { r: 255, g: 255, b: 0, a: 255 };
-    pub const CYAN: Self = Self { r: 0, g: 255, b: 255, a: 255 };
-    pub const MAGENTA: Self = Self { r: 255, g: 0, b: 255, a: 255 };
-    pub const TRANSPARENT: Self = Self { r: 0, g: 0, b: 0, a: 0 };
+    pub const BLACK: Self = Self {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    pub const WHITE: Self = Self {
+        r: 255,
+        g: 255,
+        b: 255,
+        a: 255,
+    };
+    pub const RED: Self = Self {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    pub const GREEN: Self = Self {
+        r: 0,
+        g: 128,
+        b: 0,
+        a: 255,
+    };
+    pub const BLUE: Self = Self {
+        r: 0,
+        g: 0,
+        b: 255,
+        a: 255,
+    };
+    pub const YELLOW: Self = Self {
+        r: 255,
+        g: 255,
+        b: 0,
+        a: 255,
+    };
+    pub const CYAN: Self = Self {
+        r: 0,
+        g: 255,
+        b: 255,
+        a: 255,
+    };
+    pub const MAGENTA: Self = Self {
+        r: 255,
+        g: 0,
+        b: 255,
+        a: 255,
+    };
+    pub const TRANSPARENT: Self = Self {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+    };
 }
 
 impl Default for Color {

@@ -39,7 +39,9 @@ impl Painter {
     fn fill_background(&mut self) {
         let color = self.background.to_rgba();
 
-        self.pixmap.fill(tiny_skia::Color::from_rgba8(color[0], color[1], color[2], color[3]));
+        self.pixmap.fill(tiny_skia::Color::from_rgba8(
+            color[0], color[1], color[2], color[3],
+        ));
     }
 
     pub fn draw_rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: &Color) {
@@ -49,7 +51,8 @@ impl Painter {
         paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
 
         if let Some(rect) = Rect::from_xywh(x, y, width, height) {
-            self.pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            self.pixmap
+                .fill_rect(rect, &paint, Transform::identity(), None);
         }
     }
 
@@ -67,6 +70,10 @@ impl Painter {
 
     pub fn pixmap(&self) -> &Pixmap {
         &self.pixmap
+    }
+
+    pub fn pixmap_mut(&mut self) -> &mut Pixmap {
+        &mut self.pixmap
     }
 
     pub fn to_png(&self) -> Vec<u8> {

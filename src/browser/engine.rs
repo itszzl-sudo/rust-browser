@@ -2,7 +2,7 @@
 //!
 //! 使用 obscura-net, kuchiki, Taffy 布局和 tiny-skia 渲染
 
-use crate::{renderer::Renderer, NetworkClient, DomWrapper};
+use crate::{renderer::Renderer, DomWrapper, NetworkClient};
 use log::{debug, info, warn};
 use std::path::Path;
 use thiserror::Error;
@@ -93,7 +93,8 @@ impl BrowserEngine {
             return self.load_local_file(url);
         }
 
-        let html = RUNTIME.block_on(self.network_client.fetch_html(url))
+        let html = RUNTIME
+            .block_on(self.network_client.fetch_html(url))
             .map_err(|e| BrowserError::NetworkError(e.to_string()))?;
 
         let doc = Document::from_html(&html, url);
@@ -111,7 +112,10 @@ impl BrowserEngine {
             return self.load_local_file(url);
         }
 
-        let html = self.network_client.fetch_html(url).await
+        let html = self
+            .network_client
+            .fetch_html(url)
+            .await
             .map_err(|e| BrowserError::NetworkError(e.to_string()))?;
 
         let doc = Document::from_html(&html, url);
