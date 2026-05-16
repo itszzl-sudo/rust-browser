@@ -32,6 +32,9 @@ kuchiki = "0.8"
 eframe = "0.31"
 egui = "0.31"
 
+# Work-stealing deque for thread pool
+crossbeam-deque = "0.8"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

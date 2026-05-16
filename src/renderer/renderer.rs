@@ -6,6 +6,7 @@ use crate::browser::Document;
 use crate::css::values::Color;
 use crate::renderer::context::RenderContext;
 use crate::renderer::painter::Painter;
+use crate::renderer::taffy_layout::{LayoutNode, TaffyLayoutEngine};
 use crate::renderer::text::TextRenderer;
 use crate::DomWrapper;
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Wrap};
@@ -139,17 +140,23 @@ impl Renderer {
             document.title.as_deref().unwrap_or("无标题")
         );
 
-        let (width, _height) = self.context.viewport();
-
+        let (width, height) = self.context.viewport();
         let dom = document.get_dom();
 
-        let mut renderer = CosmicRenderer {
+        // 1. 使用 Taffy 计算精确布局
+        let mut taffy = TaffyLayoutEngine::new(width as f32, height as f32);
+        if let Err(e) = taffy.compute(dom) {
+            warn!("Taffy 布局计算失败: {}, 使用手动布局回退", e);
+        }
+
+        // 2. 使用 Taffy 布局结果渲染
+        let mut renderer = TaffyRenderer {
             painter: &mut self.painter,
-            current_y: 20.0,
+            taffy: &taffy,
+            dom,
             viewport_width: width as f32,
         };
-
-        renderer.render_dom(dom);
+        renderer.render_dom();
 
         debug!("文档渲染完成");
         Ok(())
