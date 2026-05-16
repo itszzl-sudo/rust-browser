@@ -181,21 +181,10 @@ impl Color {
         Self { r, g, b, a }
     }
 
-    /// 从名称创建
+    /// 从名称创建（使用缓存优化）
     pub fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().as_str() {
-            "black" => Some(Self::BLACK),
-            "white" => Some(Self::WHITE),
-            "red" => Some(Self::RED),
-            "green" => Some(Self::GREEN),
-            "blue" => Some(Self::BLUE),
-            "yellow" => Some(Self::YELLOW),
-            "cyan" => Some(Self::CYAN),
-            "magenta" => Some(Self::MAGENTA),
-            "transparent" => Some(Self::TRANSPARENT),
-            "currentcolor" => Some(Self::BLACK), // 简化处理
-            _ => None,
-        }
+        let name_lower = name.to_lowercase();
+        get_color_name_cache().get(name_lower.as_str()).copied()
     }
 
     /// 转换为 RGBA 数组

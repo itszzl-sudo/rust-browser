@@ -9,7 +9,7 @@
 
 use anyhow::{anyhow, Result};
 use brotli::Decompressor as BrotliDecompressor;
-use flate2::read::GzDecoder;
+use flate2::{read::GzDecoder, Decompress};
 use lazy_static::lazy_static;
 use log::{debug, info, trace, warn};
 use obscura_net::ObscuraHttpClient;
@@ -185,7 +185,7 @@ impl NetworkClient {
                     response.body = decompressed;
                     response.headers.remove("content-encoding");
                 }
-                "br" | "brotli" => {
+                "br" => {
                     trace!("解压 brotli 响应体");
                     let mut decompressed = Vec::new();
                     let mut decoder = BrotliDecompressor::new(&response.body[..], 4096);
@@ -196,7 +196,6 @@ impl NetworkClient {
                 }
                 "deflate" => {
                     trace!("解压 deflate 响应体");
-                    use flate2::Decompress;
                     let mut decoder = Decompress::new(true);
                     let mut decompressed = Vec::new();
                     let result = decoder.decompress(&response.body, &mut decompressed, flate2::FlushDecompress::Finish);
@@ -206,7 +205,9 @@ impl NetworkClient {
                     response.headers.remove("content-encoding");
                 }
                 _ => {
-                    warn!("未知的 Content-Encoding: {}", encoding);
+                    if !encoding.is_empty() && !encoding.eq("identity") {
+                        warn!("未知的 Content-Encoding: {}", encoding);
+                    }
                 }
             }
         }
