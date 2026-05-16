@@ -2,7 +2,6 @@
 //!
 //! 定义颜色、长度、关键字等 CSS 值类型
 
-use log::trace;
 use std::fmt;
 
 /// 长度单位

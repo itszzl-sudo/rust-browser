@@ -2,7 +2,7 @@
 //!
 //! 使用 Vello 进行高性能 GPU 渲染（预留模块）
 use crate::css::values::Color;
-use log::{debug, info, trace};
+use log::info;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

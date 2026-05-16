@@ -10,6 +10,9 @@ name = "rust_browser"
 path = "src/main.rs"
 
 [dependencies]
+# Lazy static initialization
+lazy_static = "1.4"
+
 # CSS Layout Engine
 taffy = "0.4"
 
@@ -19,9 +22,11 @@ tiny-skia = "0.11"
 # Text rendering
 cosmic-text = "0.11"
 
-# Obscura crates
+# Obscura network crate only
 obscura-net = { path = "../obscura/crates/obscura-net" }
-obscura-dom = { path = "../obscura/crates/obscura-dom" }
+
+# HTML parsing with kuchiki
+kuchiki = "0.8"
 
 # GUI Window
 eframe = "0.31"
@@ -59,6 +64,10 @@ url = "2.5"
 
 # Image processing
 image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+# Compression decompression
+brotli = "7.0"
+flate2 = "1.0"
 
 [profile.release]
 opt-level = 3

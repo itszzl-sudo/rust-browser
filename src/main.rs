@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 use log::{info, error};
 
+// 全局日志消息
 static LOG_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn add_log_message(msg: String) {
@@ -23,12 +24,6 @@ fn add_log_message(msg: String) {
 
 fn get_log_messages() -> Vec<String> {
     LOG_MESSAGES.lock().map(|logs| logs.clone()).unwrap_or_default()
-}
-
-fn clear_log_messages() {
-    if let Ok(mut logs) = LOG_MESSAGES.lock() {
-        logs.clear();
-    }
 }
 
 const DEFAULT_URL: &str = "https://www.baidu.com";
@@ -58,7 +53,6 @@ struct BrowserApp {
     url_input: String,
     image_data: Option<egui::ColorImage>,
     error_message: Option<String>,
-    viewport_size: (u32, u32),
     initial_url: String,
     is_loading: bool,
     first_frame: bool,
@@ -68,7 +62,6 @@ struct BrowserApp {
 
 impl BrowserApp {
     fn new(initial_url: String, width: u32, height: u32) -> Self {
-        let viewport_size = (width, height);
         add_log_message("正在初始化浏览器...".to_string());
 
         let browser = match Browser::new() {
@@ -85,7 +78,6 @@ impl BrowserApp {
                     url_input: initial_url.clone(),
                     image_data: None,
                     error_message: Some(err_msg),
-                    viewport_size,
                     initial_url,
                     is_loading: false,
                     first_frame: true,
@@ -102,7 +94,6 @@ impl BrowserApp {
             url_input: initial_url.clone(),
             image_data: None,
             error_message: None,
-            viewport_size,
             initial_url,
             is_loading: false,
             first_frame: true,
@@ -148,6 +139,8 @@ impl BrowserApp {
     fn navigate(&mut self, url: &str) {
         add_log_message(format!("正在导航到: {}", url));
         self.is_loading = true;
+        self.error_message = None;
+        self.load_start_time = Some(Instant::now());
 
         if let Some(browser) = self.browser.as_mut() {
             match browser.navigate(url) {
@@ -172,26 +165,24 @@ impl BrowserApp {
 
     fn go_back(&mut self) {
         if let Some(browser) = self.browser.as_mut() {
-            if browser.go_back().is_ok() {
-                self.url_input = browser.url().to_string();
-                self.refresh_image();
+            if let Some(url) = browser.go_back() {
+                self.navigate(&url);
             }
         }
     }
 
     fn go_forward(&mut self) {
         if let Some(browser) = self.browser.as_mut() {
-            if browser.go_forward().is_ok() {
-                self.url_input = browser.url().to_string();
-                self.refresh_image();
+            if let Some(url) = browser.go_forward() {
+                self.navigate(&url);
             }
         }
     }
 
     fn reload(&mut self) {
-        if let Some(browser) = self.browser.as_mut() {
-            if browser.reload().is_ok() {
-                self.refresh_image();
+        if let Some(browser) = self.browser.as_ref() {
+            if let Some(url) = browser.reload() {
+                self.navigate(&url);
             }
         }
     }
@@ -205,6 +196,7 @@ impl eframe::App for BrowserApp {
             add_log_message(format!("将在 {} 秒后自动加载: {}", LOAD_TIMEOUT_SECS, self.initial_url));
             self.load_start_time = Some(Instant::now());
             info!("首帧渲染完成，窗口应该已显示");
+            self.refresh_image();
         }
 
         if self.auto_load_pending {
@@ -231,38 +223,6 @@ impl eframe::App for BrowserApp {
         }
 
         ctx.set_visuals(egui::Visuals::dark());
-
-        egui::TopBottomPanel::top("address_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("◀").clicked() {
-                    self.go_back();
-                }
-
-                if ui.button("▶").clicked() {
-                    self.go_forward();
-                }
-
-                if ui.button("↻").clicked() {
-                    self.reload();
-                }
-
-                if ui.button("🏠").clicked() {
-                    self.navigate(DEFAULT_URL);
-                }
-
-                let response = ui.text_edit_singleline(&mut self.url_input);
-
-                let url_to_navigate = self.url_input.clone();
-                let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if ui.button("Go").clicked() || enter_pressed {
-                    self.navigate(&url_to_navigate);
-                }
-
-                if self.is_loading {
-                    ui.label(format!("Loading... ({:.0}s)", self.load_start_time.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)));
-                }
-            });
-        });
 
         egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| {
             ui.heading("Logs");

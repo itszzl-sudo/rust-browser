@@ -1,11 +1,7 @@
-//! CSS 模块 - 样式表处理
+//! CSS 模块 - CSS 值类型
 //!
-//! 包含样式表解析和计算样式
+//! 提供 CSS 属性值类型（颜色、长度等），选择器功能由 kuchiki 提供
 
-pub mod parser;
-pub mod stylesheet;
 pub mod values;
 
-pub use parser::CssParser;
-pub use stylesheet::{MatchedRule, Rule, Selector, Stylesheet, Property};
-pub use values::{Color, Length, LengthUnit};
+pub use values::{Color, Length, LengthUnit, PropertyValue};

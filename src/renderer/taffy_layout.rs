@@ -1,9 +1,10 @@
 //! Taffy 布局引擎 - 使用 taffy 进行完整的 CSS 布局计算
 //!
-//! 整合 obscura-dom、CSS 解析和 taffy
+//! 整合 kuchiki DOM、CSS 解析和 taffy
 
 use crate::DomWrapper;
 use crate::css::values::Color;
+use kuchiki::NodeRef;
 use log::{debug, info};
 use std::collections::HashMap;
 use taffy::prelude::*;
@@ -13,8 +14,8 @@ use taffy::prelude::*;
 pub struct LayoutNode {
     /// taffy 节点 id
     pub node: NodeId,
-    /// 对应的 dom 节点 id
-    pub dom_node: obscura_dom::NodeId,
+    /// 对应的 dom 节点索引
+    pub dom_node: usize,
     /// 标签名 (用于调试)
     pub tag_name: String,
     /// 计算后的绝对 x 坐标
@@ -36,7 +37,7 @@ pub struct TaffyLayoutEngine {
     /// taffy 树管理器
     taffy: TaffyTree,
     /// dom_node -> LayoutNode 映射
-    layout_nodes: HashMap<obscura_dom::NodeId, LayoutNode>,
+    layout_nodes: HashMap<usize, LayoutNode>,
     /// 根节点
     root: Option<NodeId>,
     /// 视口尺寸
@@ -112,53 +113,49 @@ impl TaffyLayoutEngine {
     /// 递归构建树
     fn build_tree_recursive(
         &mut self,
-        dom_node: obscura_dom::NodeId,
+        dom_node: usize,
         taffy_parent: NodeId,
         dom: &DomWrapper,
     ) -> Result<(), String> {
-        if let Some(node_obj) = dom.get_node(dom_node) {
-            match &node_obj.data {
-                obscura_dom::NodeData::Element { name, attrs, .. } => {
-                    // 创建该元素的 taffy 节点
-                    let tag_name = name.local.to_string();
-                    let style = self.determine_style(tag_name.as_str(), attrs);
+        if let Some(node_ref) = dom.get_node(dom_node) {
+            if let Some(element) = node_ref.as_element() {
+                let tag_name = element.name.local.to_string();
+                let attrs = element.attributes.borrow();
+                
+                let style = self.determine_style(&tag_name, &attrs);
 
-                    let taffy_node = self.taffy
-                        .new_leaf(style)
-                        .map_err(|e| format!("创建元素节点 {} 失败: {}", tag_name, e))?;
+                let taffy_node = self.taffy
+                    .new_leaf(style)
+                    .map_err(|e| format!("创建元素节点 {} 失败: {}", tag_name, e))?;
 
-                    self.taffy
-                        .add_child(taffy_parent, taffy_node)
-                        .map_err(|e| format!("添加子节点 {} 失败: {}", tag_name, e))?;
+                self.taffy
+                    .add_child(taffy_parent, taffy_node)
+                    .map_err(|e| format!("添加子节点 {} 失败: {}", tag_name, e))?;
 
-                    // 创建 layout node
-                    let layout_node = LayoutNode {
-                        node: taffy_node,
-                        dom_node,
-                        tag_name: tag_name.clone(),
-                        x: 0.0,
-                        y: 0.0,
-                        width: 0.0,
-                        height: 0.0,
-                        background: self.determine_background(tag_name.as_str()),
-                        color: None,
-                    };
+                let layout_node = LayoutNode {
+                    node: taffy_node,
+                    dom_node,
+                    tag_name: tag_name.clone(),
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                    background: self.determine_background(&tag_name),
+                    color: None,
+                };
 
-                    self.layout_nodes.insert(dom_node, layout_node);
+                self.layout_nodes.insert(dom_node, layout_node);
 
-                    // 递归处理子节点
-                    for child in dom.children(dom_node) {
-                        self.build_tree_recursive(child, taffy_node, dom)?;
-                    }
+                // 递归处理子节点
+                for child in dom.children(dom_node) {
+                    self.build_tree_recursive(child, taffy_node, dom)?;
                 }
-                obscura_dom::NodeData::Text { .. } => {
-                    // 简单处理文本节点
-                }
-                _ => {
-                    // 处理其他类型
-                    for child in dom.children(dom_node) {
-                        self.build_tree_recursive(child, taffy_parent, dom)?;
-                    }
+            } else if node_ref.as_text().is_some() {
+                // 文本节点 - 简单处理
+            } else {
+                // 其他类型节点
+                for child in dom.children(dom_node) {
+                    self.build_tree_recursive(child, taffy_parent, dom)?;
                 }
             }
         }
@@ -167,7 +164,7 @@ impl TaffyLayoutEngine {
     }
 
     /// 根据标签名确定默认样式
-    fn determine_style(&self, tag_name: &str, attrs: &obscura_dom::AttributeMap) -> Style {
+    fn determine_style(&self, tag_name: &str, attrs: &kuchiki::AttributeMap) -> Style {
         let tag_lower = tag_name.to_lowercase();
         let mut style = Style::default();
 
@@ -178,7 +175,7 @@ impl TaffyLayoutEngine {
             | "form" | "table" | "tr" => {
                 style.display = Display::Block;
                 style.flex_direction = FlexDirection::Column;
-                style.margin = Rect::from_length(0.0, 0.0, 10.0, 0.0); // 底部外边距
+                style.margin = Rect::from_length(0.0, 0.0, 10.0, 0.0);
             }
             "span" | "a" | "em" | "strong" | "b" | "i" | "code" => {
                 style.display = Display::Inline;
@@ -220,7 +217,6 @@ impl TaffyLayoutEngine {
                 style.flex_direction = FlexDirection::Column;
             }
             _ => {
-                // 默认作为 block
                 style.display = Display::Block;
             }
         }
@@ -248,7 +244,7 @@ impl TaffyLayoutEngine {
             "p" => {
                 style.size = Size {
                     width: Dimension::Percent(1.0),
-                    height: Dimension::Length(40.0), // 默认高度，后续可动态调整
+                    height: Dimension::Length(40.0),
                 };
             }
             "li" => {
@@ -280,7 +276,6 @@ impl TaffyLayoutEngine {
                 .compute_layout(root, self.viewport)
                 .map_err(|e| format!("布局计算失败: {}", e))?;
 
-            // 保存计算后的坐标
             for (dom_node, mut layout_node) in self.layout_nodes.clone() {
                 let layout = self.taffy.layout(layout_node.node)
                     .map_err(|e| format!("获取节点布局失败: {}", e))?;
@@ -297,7 +292,7 @@ impl TaffyLayoutEngine {
     }
 
     /// 获取 dom 节点的布局
-    pub fn get_layout(&self, dom_node: obscura_dom::NodeId) -> Option<&LayoutNode> {
+    pub fn get_layout(&self, dom_node: usize) -> Option<&LayoutNode> {
         self.layout_nodes.get(&dom_node)
     }
 
