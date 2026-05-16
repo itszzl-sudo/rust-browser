@@ -151,11 +151,11 @@ impl<'a> SimpleRenderer<'a> {
     fn render_node_recursive(&mut self, node: usize, dom: &DomWrapper) {
         if let Some(node_ref) = dom.get_node(node) {
             if let Some(text) = node_ref.as_text() {
-                let contents = text.borrow().clone();
+                let contents = text.borrow();
                 self.render_text(&contents);
             } else if let Some(element) = node_ref.as_element() {
-                let tag_name = element.name.local.to_string();
-                self.render_element(&tag_name, node, dom);
+                let tag_name = &element.name.local;
+                self.render_element(tag_name, dom);
             }
         }
 
@@ -191,10 +191,8 @@ impl<'a> SimpleRenderer<'a> {
         }
     }
 
-    fn render_element(&mut self, tag: &str, _node: usize, _dom: &DomWrapper) {
-        let tag_lower = tag.to_lowercase();
-
-        match tag_lower.as_str() {
+    fn render_element(&mut self, tag: &str, dom: &DomWrapper) {
+        match tag {
             "h1" => {
                 self.painter.paint_rect(
                     20.0,

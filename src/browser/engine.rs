@@ -23,7 +23,6 @@ pub enum BrowserError {
 
 #[derive(Clone)]
 pub struct Document {
-    pub html: String,
     pub dom: DomWrapper,
     pub title: Option<String>,
     pub url: String,
@@ -32,7 +31,6 @@ pub struct Document {
 impl std::fmt::Debug for Document {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Document")
-            .field("html", &format!("{} bytes", self.html.len()))
             .field("title", &self.title)
             .field("url", &self.url)
             .finish()
@@ -45,7 +43,6 @@ impl Document {
         let title = dom.title();
 
         Self {
-            html: html.to_string(),
             dom,
             title,
             url: url.to_string(),

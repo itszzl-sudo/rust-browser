@@ -4,14 +4,12 @@
 //!
 //! # 特性
 //!
-//! - obscura-net 网络请求（增强版：超时、Cookie、Chrome UA、gzip/brotli解压）
-//! - kuchiki DOM 解析
+//! - obscura-net 网络请求（超时、Cookie、gzip/brotli解压）
+//! - kuchiki DOM 解析和 CSS 选择器
 //! - Taffy 布局引擎
 //! - tiny-skia 像素渲染
-//! - cosmic-text 文本渲染
-//! - CSS 解析和应用
+//! - egui 界面层（崩溃隔离）
 //! - 多标签页支持
-//! - Chrome 风格 UI
 //! - 截图功能
 //!
 //! # 示例
@@ -31,12 +29,12 @@ pub mod network;
 pub mod dom_wrapper;
 
 pub mod html;
+
 #[allow(deprecated)]
 pub mod dom;
 
 pub use browser::{Browser, BrowserEngine, Document, BrowserError, DEFAULT_HOME_URL};
 pub use browser::{Tab, TabManager};
-pub use browser::{ChromeUiState, ChromeButton};
 pub use css::values::Color;
 #[allow(deprecated)]
 pub use dom::node::DomTree;

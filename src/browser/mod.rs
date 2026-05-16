@@ -241,8 +241,9 @@ impl Browser {
         if let Some(img_data) = page_image {
             Ok(img_data)
         } else {
-            // 渲染备用图像
-            let mut p = tiny_skia::Pixmap::new(800, 600).ok_or_else(|| 
+            // 使用实际视口尺寸渲染备用图像
+            let (width, height) = (self.width, self.height);
+            let mut p = tiny_skia::Pixmap::new(width, height).ok_or_else(|| 
                 BrowserError::RenderError("无法创建像素图".to_string()))?;
             let _ = p.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
             Ok(p.encode_png().unwrap_or_default())

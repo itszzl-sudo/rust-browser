@@ -2,7 +2,23 @@
 //!
 //! 定义颜色、长度、关键字等 CSS 值类型
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
+
+static COLOR_CACHE: OnceLock<HashMap<&'static str, Color>> = OnceLock::new();
+
+fn get_color_cache() -> &'static HashMap<&'static str, Color> {
+    COLOR_CACHE.get_or_init(|| {
+        let mut map = HashMap::new();
+        map.insert("#333333", Color::rgb(51, 51, 51));
+        map.insert("#cccccc", Color::rgb(204, 204, 204));
+        map.insert("#e0e0e0", Color::rgb(224, 224, 224));
+        map.insert("#666666", Color::rgb(102, 102, 102));
+        map.insert("#999999", Color::rgb(153, 153, 153));
+        map
+    })
+}
 
 /// 长度单位
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -115,20 +131,22 @@ pub struct Color {
 }
 
 impl Color {
-    /// 从十六进制创建
+    /// 从十六进制创建（使用缓存优化）
     pub fn from_hex(hex: &str) -> Self {
         let hex = hex.trim_start_matches('#');
-        
-        match hex.len() {
+
+        if let Some(cached) = get_color_cache().get(hex) {
+            return cached.clone();
+        }
+
+        let color = match hex.len() {
             3 => {
-                // #RGB 格式
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).unwrap_or(0);
                 let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).unwrap_or(0);
                 let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).unwrap_or(0);
                 Self { r, g, b, a: 255 }
             }
             4 => {
-                // #RGBA 格式
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).unwrap_or(0);
                 let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).unwrap_or(0);
                 let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).unwrap_or(0);
@@ -136,14 +154,12 @@ impl Color {
                 Self { r, g, b, a }
             }
             6 => {
-                // #RRGGBB 格式
                 let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
                 let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
                 let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
                 Self { r, g, b, a: 255 }
             }
             8 => {
-                // #RRGGBBAA 格式
                 let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
                 let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
                 let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
@@ -151,7 +167,8 @@ impl Color {
                 Self { r, g, b, a }
             }
             _ => Self::BLACK,
-        }
+        };
+        color
     }
 
     /// 从 RGB 创建
