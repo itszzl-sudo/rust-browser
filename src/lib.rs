@@ -25,14 +25,21 @@
 pub mod browser;
 pub mod browser_process;
 pub mod css;
+pub mod css_engine;
 pub mod dom_wrapper;
+
+#[cfg(feature = "js")]
+pub mod js_engine;
 pub mod mojo;
 pub mod network;
 pub mod renderer;
 pub mod renderer_process;
+pub mod storage;
 pub mod task_queue;
 
 pub mod html;
+
+pub mod bridge;
 
 #[allow(deprecated)]
 pub mod dom;

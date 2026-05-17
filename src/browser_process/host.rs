@@ -353,9 +353,87 @@ fn run_renderer_process(
             }
         }
 
-        // 处理输入消息（暂简化——仅丢弃，后续可接入实际输入处理）
-        while let Some(_msg) = input_binding.try_receive() {
-            // 输入事件处理暂不实现
+        // 处理输入消息
+        while let Some(msg) = input_binding.try_receive() {
+            match msg.name.as_ref() {
+                "MouseClick" => {
+                    // 解析坐标（格式: x|y|button）
+                    let s = String::from_utf8_lossy(&msg.data);
+                    let parts: Vec<&str> = s.split('|').collect();
+                    if parts.len() >= 2 {
+                        let x: f32 = parts[0].parse().unwrap_or(0.0);
+                        let y: f32 = parts[1].parse().unwrap_or(0.0);
+                        debug!("Renderer #{} MouseClick at ({:.1}, {:.1})", id, x, y);
+
+                        // hit testing：在渲染器的布局结果中查找点击位置对应的元素
+                        if let Some(doc) = &renderer.document() {
+                            let dom = doc.get_dom();
+                            if let Some(href) = renderer.hit_test_link(x, y, dom) {
+                                info!("Renderer #{} 点击链接: {} -> 导航", id, href);
+                                // 处理相对 URL
+                                let absolute_url = if href.starts_with("http://")
+                                    || href.starts_with("https://")
+                                    || href.starts_with("file://")
+                                {
+                                    href.clone()
+                                } else {
+                                    // 基于当前 URL 解析相对路径
+                                    let base = current_url.trim_end_matches('/');
+                                    if href.starts_with('/') {
+                                        // 绝对路径，基于域名
+                                        if let Some(pos) = base.find("//") {
+                                            let after_scheme = &base[pos + 2..];
+                                            if let Some(slash_pos) = after_scheme.find('/') {
+                                                format!(
+                                                    "{}://{}{}",
+                                                    &base[..base.find("//").unwrap_or(pos)],
+                                                    &after_scheme[..slash_pos],
+                                                    href
+                                                )
+                                            } else {
+                                                format!("{}{}", base, href)
+                                            }
+                                        } else {
+                                            format!("{}{}", base, href)
+                                        }
+                                    } else {
+                                        format!("{}/{}", base, href)
+                                    }
+                                };
+                                current_url = absolute_url.clone();
+
+                                // 重新加载新页面
+                                let new_width = renderer.context().viewport().0;
+                                let new_height = renderer.context().viewport().1;
+                                renderer.set_viewport(new_width, new_height);
+
+                                if let Ok(doc) = load_document(&current_url) {
+                                    let title = doc.title.clone();
+                                    let doc_opt = Some(doc);
+                                    if let Ok(png) = renderer.render(&doc_opt) {
+                                        let result = RenderResultMessage {
+                                            png_data: png,
+                                            width: new_width,
+                                            height: new_height,
+                                            title,
+                                        };
+                                        let _ = result_proxy.send_message(result.to_message());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "Scroll" => {
+                    debug!("Renderer #{} Scroll event received", id);
+                }
+                "MouseMove" => {
+                    debug!("Renderer #{} MouseMove event received", id);
+                }
+                _ => {
+                    debug!("Renderer #{} 未知输入消息: {}", id, msg.name);
+                }
+            }
         }
 
         // 检查通道是否关闭（浏览器端已断开连接）

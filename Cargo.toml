@@ -2,7 +2,7 @@
 name = "rust-browser"
 version = "0.1.0"
 edition = "2021"
-authors = ["Rust Browser Team"]
+authors = ["IrisVerse Rust Browser Team"]
 description = "A browser engine built with obscura, taffy and tiny-skia"
 
 [[bin]]
@@ -10,67 +10,57 @@ name = "rust_browser"
 path = "src/main.rs"
 
 [dependencies]
-# Lazy static initialization
 lazy_static = "1.4"
 
-# CSS Layout Engine
-taffy = "0.4"
+# taffy 0.10.0 本地源码
+taffy = { path = "../taffy-0.10.0", features = ["block_layout", "flexbox", "grid"] }
 
-# 2D Graphics Rendering
-tiny-skia = "0.11"
+# tiny-skia 0.12.0 本地源码
+tiny-skia = { path = "../tiny-skia-0.12.0" }
 
-# Text rendering
-cosmic-text = "0.11"
+# cosmic-text 0.19.0 本地源码
+cosmic-text = { path = "../cosmic-text-0.19.0" }
 
-# Obscura network crate only
+reqwest = { version = "0.12", features = ["gzip", "brotli"] }
+
+# kuchiki 0.12.0 本地源码
+kuchiki = { path = "../kuchikikiki-0.12.0", package = "kuchikikiki" }
+
+obscura-dom = { path = "../obscura/crates/obscura-dom" }
+obscura-js = { path = "../obscura/crates/obscura-js", optional = true }
 obscura-net = { path = "../obscura/crates/obscura-net" }
 
-# HTML parsing with kuchiki
-kuchiki = "0.8"
+# GUI 可选（Windows wgpu 编译问题）
+eframe = { version = "0.34", optional = true, default-features = false, features = ["default"] }
+egui = { version = "0.34", optional = true }
 
-# GUI Window
-eframe = "0.31"
-egui = "0.31"
-
-# Work-stealing deque for thread pool
 crossbeam-deque = "0.8"
-
-# Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# JavaScript engine (暂时禁用，Windows 编译需要 patch 工具)
-# rquickjs = "0.6"
+cssparser = "0.35"
+selectors = "0.27"
+precomputed-hash = "0.1"
 
-# CSS parsing
-cssparser = "0.31"
-selectors = "0.26"
-
-# Logging
 log = "0.4"
 env_logger = "0.11"
-
-# Error handling
 thiserror = "2.0"
 anyhow = "1.0"
-
-# Thread-safe reference
 parking_lot = "0.12"
-
-# Async
 futures = "0.3"
-
-# CLI
 clap = { version = "4.5", features = ["derive"] }
-
-# URL handling
 url = "2.5"
 
-# Image processing
-image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "bmp"] }
+resvg = { version = "0.47", default-features = false, features = [] }
+usvg = { version = "0.47", default-features = false, features = [] }
 
-# Compression decompression
+image = { version = "0.25.1", features = ["png", "jpeg", "gif", "webp", "bmp"] }
 brotli = "7.0"
 flate2 = "1.0"
+
+[features]
+default = ["js", "gui"]
+js = ["obscura-js"]
+gui = ["eframe", "egui"]
 
 [profile.release]
 opt-level = 3

@@ -312,7 +312,30 @@ impl eframe::App for BrowserApp {
                 );
 
                 ui.centered_and_justified(|ui| {
-                    ui.image(&texture);
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), ui.available_height()),
+                        egui::Sense::click(),
+                    );
+
+                    // 检测鼠标点击并通过 IPC 发送到渲染器
+                    let click_resp = ui.interact(rect, ui.next_auto_id(), egui::Sense::click());
+                    if click_resp.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = ctx.pointer_interact_pos() {
+                            if let Some(ref host) = self.browser_host {
+                                add_log_message(format!("页面点击: ({:.0}, {:.0})", pos.x, pos.y));
+                                let _ = host.send_input(
+                                    rust_browser::browser_process::interfaces::InputEvent::MouseClick {
+                                        x: pos.x as f32,
+                                        y: pos.y as f32,
+                                        button: 0, // 左键
+                                    },
+                                );
+                            }
+                        }
+                    }
+
+                    // 显示图像
+                    ui.put_image(rect, &texture);
                 });
             } else if self.auto_load_pending || self.is_loading {
                 ui.centered_and_justified(|ui| {

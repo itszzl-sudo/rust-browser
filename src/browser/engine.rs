@@ -2,8 +2,10 @@
 //!
 //! 使用 obscura-net, kuchiki, Taffy 布局和 tiny-skia 渲染
 
+#[cfg(feature = "js")]
+use crate::js_engine::JsEngine;
 use crate::{renderer::Renderer, DomWrapper, NetworkClient};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use std::path::Path;
 use thiserror::Error;
 
@@ -19,6 +21,8 @@ pub enum BrowserError {
     PageNotLoaded,
     #[error("网络请求失败: {0}")]
     NetworkError(String),
+    #[error("JS 执行失败: {0}")]
+    JsError(String),
 }
 
 #[derive(Clone)]
@@ -41,7 +45,6 @@ impl Document {
     pub fn from_html(html: &str, url: &str) -> Self {
         let dom = DomWrapper::from_html(html, Some(url));
         let title = dom.title();
-
         Self {
             dom,
             title,
@@ -66,6 +69,8 @@ pub struct BrowserEngine {
     title: Option<String>,
     current_url: Option<String>,
     network_client: NetworkClient,
+    #[cfg(feature = "js")]
+    js_engine: JsEngine,
 }
 
 impl BrowserEngine {
@@ -83,6 +88,8 @@ impl BrowserEngine {
             title: None,
             current_url: None,
             network_client,
+            #[cfg(feature = "js")]
+            js_engine: JsEngine::new(),
         })
     }
 
@@ -101,6 +108,10 @@ impl BrowserEngine {
         self.document = Some(doc);
         self.current_url = Some(url.to_string());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
+
+        #[cfg(feature = "js")]
+        self.run_page_scripts(url, &html);
+
         info!("页面加载成功");
         Ok(())
     }
@@ -122,6 +133,10 @@ impl BrowserEngine {
         self.document = Some(doc);
         self.current_url = Some(url.to_string());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
+
+        #[cfg(feature = "js")]
+        self.run_page_scripts(url, &html);
+
         info!("页面加载成功");
         Ok(())
     }
@@ -133,6 +148,10 @@ impl BrowserEngine {
         self.document = Some(doc);
         self.current_url = Some(url.to_string());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
+
+        #[cfg(feature = "js")]
+        self.run_page_scripts(url, html);
+
         Ok(())
     }
 
@@ -145,6 +164,10 @@ impl BrowserEngine {
                 self.document = Some(doc);
                 self.current_url = Some(path.to_string());
                 self.title = self.document.as_ref().and_then(|d| d.title.clone());
+
+                #[cfg(feature = "js")]
+                self.run_page_scripts(path, &html);
+
                 info!("本地文件加载成功");
                 Ok(())
             }
@@ -164,6 +187,69 @@ impl BrowserEngine {
                 Ok(())
             }
         }
+    }
+
+    /// 执行页面中的 `<script>` 标签
+    #[cfg(feature = "js")]
+    fn run_page_scripts(&mut self, url: &str, html: &str) {
+        // 初始化 JS 引擎
+        if let Err(e) = self.js_engine.initialize(url) {
+            warn!("JS 引擎初始化失败: {}", e);
+            return;
+        }
+        self.js_engine.set_url(url);
+
+        // 解析 HTML 提取脚本
+        use kuchiki::traits::TendrilSink;
+        let dom = kuchiki::parse_html().one(html);
+        for node in dom.descendants() {
+            if let Some(el) = node.as_element() {
+                if el.name.local.as_ref() == "script" {
+                    // 检查 src 属性（外部脚本）
+                    let src = el.attributes.borrow().get("src").map(|s| s.to_string());
+                    if let Some(script_url) = src {
+                        if !script_url.is_empty() {
+                            // 尝试下载并执行外部脚本
+                            let full_url = if script_url.starts_with("http") {
+                                script_url.clone()
+                            } else {
+                                // 相对路径拼接
+                                let base = url.trim_end_matches('/');
+                                format!("{}/{}", base, script_url.trim_start_matches('/'))
+                            };
+                            if let Some(code) = self.download_script(&full_url) {
+                                if let Err(e) = self.js_engine.evaluate(&code) {
+                                    error!("外部脚本执行失败 ({}): {}", full_url, e);
+                                }
+                            }
+                        }
+                    } else {
+                        // 内联脚本
+                        for child in node.children() {
+                            if let Some(text) = child.as_text() {
+                                let code = text.borrow();
+                                if !code.trim().is_empty() {
+                                    if let Err(e) = self.js_engine.evaluate(&code) {
+                                        error!("内联脚本执行失败: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 下载外部脚本
+    #[cfg(feature = "js")]
+    fn download_script(&self, url: &str) -> Option<String> {
+        let rt = tokio::runtime::Runtime::new().ok()?;
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            let resp = client.get(url).send().await.ok()?;
+            resp.text().await.ok()
+        })
     }
 
     pub fn title(&self) -> Option<&str> {
@@ -193,7 +279,6 @@ impl BrowserEngine {
         if self.document.is_none() {
             return Err(BrowserError::PageNotLoaded);
         }
-
         self.renderer
             .render(&self.document)
             .map_err(|e| BrowserError::RenderError(e.to_string()))
@@ -201,21 +286,30 @@ impl BrowserEngine {
 
     pub fn screenshot(&mut self, path: &Path) -> Result<(), BrowserError> {
         let image_data = self.render_to_image()?;
-
         let img = image::load_from_memory(&image_data)
             .map_err(|e| BrowserError::RenderError(e.to_string()))?;
-
         img.save(path)
             .map_err(|e| BrowserError::RenderError(e.to_string()))?;
-
         Ok(())
     }
 
-    pub fn execute_js(&self, _script: &str) -> Result<String, BrowserError> {
+    pub fn execute_js(&mut self, script: &str) -> Result<String, BrowserError> {
         if self.document.is_none() {
             return Err(BrowserError::PageNotLoaded);
         }
-        Ok("undefined".to_string())
+        #[cfg(feature = "js")]
+        {
+            let result = self
+                .js_engine
+                .evaluate(script)
+                .map_err(|e| BrowserError::JsError(e))?;
+            return Ok(result);
+        }
+        #[cfg(not(feature = "js"))]
+        {
+            let _ = script;
+            Ok("undefined".to_string())
+        }
     }
 }
 

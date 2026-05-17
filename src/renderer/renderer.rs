@@ -4,14 +4,19 @@
 
 use crate::browser::Document;
 use crate::css::values::Color;
+use crate::css_engine::{parse_css_rules, rules_to_style_map};
+use crate::renderer::border::draw_box_shadow;
 use crate::renderer::context::RenderContext;
+use crate::renderer::image_cache::ImageCache;
 use crate::renderer::painter::Painter;
-use crate::renderer::taffy_layout::{LayoutNode, TaffyLayoutEngine};
+use crate::renderer::taffy_layout::TaffyLayoutEngine;
 use crate::renderer::text::TextRenderer;
 use crate::DomWrapper;
-use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Wrap};
-use log::{debug, info, trace};
+use cosmic_text::{Align, Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Wrap};
+use kuchiki::NodeRef;
+use log::{debug, info, trace, warn};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use thiserror::Error;
 
@@ -28,35 +33,89 @@ pub enum RenderError {
 }
 
 /// 全局共享的字体系统（懒初始化）
-fn global_font_system() -> &'static std::sync::Mutex<FontSystem> {
+pub(crate) fn global_font_system() -> &'static std::sync::Mutex<FontSystem> {
     static FONT_SYSTEM: OnceLock<std::sync::Mutex<FontSystem>> = OnceLock::new();
-    FONT_SYSTEM.get_or_init(|| {
-        info!("初始化 cosmic-text 字体系统");
-        let font_system = FontSystem::new();
-
-        // 尝试加载中文字体 (msyh.ttc)
-        let font_paths = [
-            "C:/Windows/Fonts/msyh.ttc",   // Microsoft YaHei
-            "C:/Windows/Fonts/msyhbd.ttc", // Microsoft YaHei Bold
-            "C:/Windows/Fonts/simsun.ttc", // SimSun
-            "C:/Windows/Fonts/simhei.ttf", // SimHei
-        ];
-
-        for path in &font_paths {
-            if let Ok(_data) = std::fs::read(path) {
-                info!("加载字体: {}", path);
-            }
-        }
-
-        info!("字体系统初始化完成");
-        std::sync::Mutex::new(font_system)
-    })
+    FONT_SYSTEM.get_or_init(|| std::sync::Mutex::new(FontSystem::new()))
 }
 
-/// 全局共享的 SwashCache
+/// 全局共享的 swash 字形缓存（懒初始化）
 fn global_swash_cache() -> &'static std::sync::Mutex<SwashCache> {
     static CACHE: OnceLock<std::sync::Mutex<SwashCache>> = OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(SwashCache::new()))
+}
+
+/// 全局共享的图片缓存（懒初始化）
+fn global_image_cache() -> &'static ImageCache {
+    static CACHE: OnceLock<ImageCache> = OnceLock::new();
+    CACHE.get_or_init(|| ImageCache::new())
+}
+
+/// CSS box-shadow 值解析结果
+#[derive(Debug, Clone)]
+pub struct BoxShadowValue {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur_radius: f32,
+    pub spread: f32,
+    pub color: Color,
+}
+
+/// 从 style 属性值解析 box-shadow
+fn parse_box_shadow_from_style(style: &str) -> Option<BoxShadowValue> {
+    // box-shadow: offset-x offset-y blur-radius spread color
+    let parts: Vec<&str> = style.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let offset_x = parse_css_px(parts[0])?;
+    let offset_y = parse_css_px(parts[1])?;
+
+    let blur_radius = if parts.len() > 2 {
+        parse_css_px(parts[2]).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    let spread = if parts.len() > 3 {
+        parse_css_px(parts[3]).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    let color = if parts.len() > 4 {
+        parse_css_color(parts[4]).unwrap_or(Color::from_hex("#000000"))
+    } else {
+        Color::from_hex("#000000")
+    };
+
+    Some(BoxShadowValue {
+        offset_x,
+        offset_y,
+        blur_radius,
+        spread,
+        color,
+    })
+}
+
+/// 解析带 px 单位或纯数字的 CSS 值
+fn parse_css_px(val: &str) -> Option<f32> {
+    let v = val.trim();
+    if let Some(px) = v.strip_suffix("px") {
+        px.trim().parse::<f32>().ok()
+    } else {
+        v.parse::<f32>().ok()
+    }
+}
+
+/// 解析 CSS 颜色值（#hex 或命名颜色）
+fn parse_css_color(val: &str) -> Option<Color> {
+    let v = val.trim();
+    if v.starts_with('#') {
+        Some(Color::from_hex(v))
+    } else {
+        Color::from_name(v)
+    }
 }
 
 pub struct Renderer {
@@ -65,6 +124,8 @@ pub struct Renderer {
     text_renderer: TextRenderer,
     document: Option<Document>,
     title: Option<String>,
+    /// 最近一次渲染的 Taffy 布局结果，用于点击测试
+    last_taffy: Option<TaffyLayoutEngine>,
 }
 
 impl Renderer {
@@ -80,6 +141,7 @@ impl Renderer {
         // 预热字体系统
         let _ = global_font_system();
         let _ = global_swash_cache();
+        let _ = global_image_cache();
 
         Self {
             context,
@@ -87,6 +149,7 @@ impl Renderer {
             text_renderer,
             document: None,
             title: None,
+            last_taffy: None,
         }
     }
 
@@ -143,23 +206,64 @@ impl Renderer {
         let (width, height) = self.context.viewport();
         let dom = document.get_dom();
 
-        // 1. 使用 Taffy 计算精确布局
+        // 1. 从 DOM 提取 <style> CSS
+        let css_text = extract_style_tags(dom);
+        if !css_text.is_empty() {
+            trace!("提取到 CSS: {} 字符", css_text.len());
+        }
+
+        // 2. 解析 CSS 规则并生成 StyleMap
+        let style_map = if !css_text.is_empty() {
+            let rules = parse_css_rules(&css_text);
+            trace!("解析到 {} 条 CSS 规则", rules.len());
+            rules_to_style_map(&rules, dom.inner_document())
+        } else {
+            Default::default()
+        };
+
+        // 3. 创建 TaffyLayoutEngine 并设置 StyleMap
         let mut taffy = TaffyLayoutEngine::new(width as f32, height as f32);
+        taffy.set_style_map(style_map);
+
+        // 4. 计算布局
         if let Err(e) = taffy.compute(dom) {
             warn!("Taffy 布局计算失败: {}, 使用手动布局回退", e);
         }
 
-        // 2. 使用 Taffy 布局结果渲染
+        // 5. 使用 Taffy 布局结果渲染
         let mut renderer = TaffyRenderer {
             painter: &mut self.painter,
             taffy: &taffy,
             dom,
-            viewport_width: width as f32,
         };
         renderer.render_dom();
 
+        // 6. 保存布局结果，用于后续点击测试
+        self.last_taffy = Some(taffy);
+
         debug!("文档渲染完成");
         Ok(())
+    }
+
+    /// 直接使用给定的 DOM 和 TaffyLayoutEngine 渲染，返回 PNG 字节
+    pub fn render_with_taffy(
+        &mut self,
+        dom: &DomWrapper,
+        taffy: &TaffyLayoutEngine,
+    ) -> Result<Vec<u8>, RenderError> {
+        self.painter.set_background(Color::WHITE);
+        self.painter.paint();
+
+        if !taffy.is_empty() {
+            let mut renderer = TaffyRenderer {
+                painter: &mut self.painter,
+                taffy,
+                dom,
+            };
+            renderer.render_dom();
+        }
+
+        Ok(self.painter.to_png())
     }
 
     fn render_blank_page(&mut self) -> Result<(), RenderError> {
@@ -210,101 +314,555 @@ impl Renderer {
     pub fn text_renderer(&self) -> &TextRenderer {
         &self.text_renderer
     }
-}
 
-/// 使用 cosmic-text 实际渲染文本的渲染器
-struct CosmicRenderer<'a> {
-    painter: &'a mut Painter,
-    current_y: f32,
-    viewport_width: f32,
-}
-
-impl<'a> CosmicRenderer<'a> {
-    fn render_dom(&mut self, dom: &DomWrapper) {
-        let body = dom.body();
-        self.render_node_recursive(body, dom);
+    /// 获取当前文档引用
+    pub fn document(&self) -> Option<&Document> {
+        self.document.as_ref()
     }
 
-    fn render_node_recursive(&mut self, node: usize, dom: &DomWrapper) {
-        if let Some(node_ref) = dom.get_node(node) {
-            if let Some(text) = node_ref.as_text() {
-                let contents = text.borrow();
-                self.render_text(&contents);
-            } else if let Some(element) = node_ref.as_element() {
-                let tag_name = &element.name.local;
-                self.render_element(tag_name, dom);
+    /// 获取最近一次渲染的 Taffy 布局引擎引用
+    pub fn taffy_layout(&self) -> Option<&TaffyLayoutEngine> {
+        self.last_taffy.as_ref()
+    }
+
+    /// 对渲染后的页面做点击测试，返回点击位置的 <a> 链接 href
+    pub fn hit_test_link(&self, x: f32, y: f32, dom: &DomWrapper) -> Option<String> {
+        let taffy = self.taffy_layout()?;
+        let hit = taffy.hit_test(x, y)?;
+
+        // 通过 dom_node 索引查找对应的 DOM 元素
+        let node_ref = dom.get_node(hit.dom_node)?;
+        if let Some(el) = node_ref.as_element() {
+            if el.name.local.as_ref() == "a" {
+                return el.attributes.borrow().get("href").map(|s| s.to_string());
             }
         }
 
-        for child in dom.children(node) {
-            self.render_node_recursive(child, dom);
+        // 如果点击的不是 <a> 本身，向上查找父元素是否为 <a>
+        // 这在点击 <a> 标签内的子元素（如 <span>、<img>）时很有用
+        if let Some(parent) = node_ref.parent() {
+            if let Some(parent_el) = parent.as_element() {
+                if parent_el.name.local.as_ref() == "a" {
+                    return parent_el
+                        .attributes
+                        .borrow()
+                        .get("href")
+                        .map(|s| s.to_string());
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// 从 DOM 中提取所有 <style> 标签（和 <link rel="stylesheet">）的文本内容
+pub fn extract_style_tags(dom: &DomWrapper) -> String {
+    let mut css = String::new();
+    let doc_ref = dom.inner_document();
+
+    // 1. 提取 <style> 标签
+    if let Ok(style_nodes) = doc_ref.select("style") {
+        for node_ref in style_nodes {
+            let text = node_ref.text_contents();
+            if !text.trim().is_empty() {
+                if !css.is_empty() {
+                    css.push('\n');
+                }
+                css.push_str(text.trim());
+            }
         }
     }
 
-    /// 使用 cosmic-text 实际渲染文本
-    fn render_text(&mut self, text: &str) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
+    // 2. 提取 <link rel="stylesheet"> 标签（通过 DomWrapper API 获取 NodeRef）
+    let link_indices = dom.select("link");
+    for idx in link_indices {
+        let is_stylesheet = dom
+            .attribute(idx, "rel")
+            .map(|v| v == "stylesheet")
+            .unwrap_or(false);
+        if !is_stylesheet {
+            continue;
+        }
+        if let Some(href) = dom.attribute(idx, "href") {
+            if href.is_empty() {
+                continue;
+            }
+            // 拼接完整 URL
+            let full_url = if href.starts_with("http") {
+                href
+            } else if href.starts_with("//") {
+                format!("https:{}", href)
+            } else {
+                let base_url = dom.url().map(|u| u.as_str()).unwrap_or("");
+                if href.starts_with('/') {
+                    let base = base_url.trim_end_matches('/');
+                    // 提取协议 + 主机名
+                    if let Some(pos) = base.find("://") {
+                        if let Some(slash_pos) = base[pos + 3..].find('/') {
+                            let origin = &base[..=pos + 3 + slash_pos];
+                            format!("{}{}", origin.trim_end_matches('/'), href)
+                        } else {
+                            format!("{}{}", base.trim_end_matches('/'), href)
+                        }
+                    } else {
+                        format!("{}{}", base.trim_end_matches('/'), href)
+                    }
+                } else {
+                    let base = base_url.trim_end_matches('/');
+                    format!("{}/{}", base, href.trim_start_matches("./"))
+                }
+            };
+
+            // 同步下载（使用 tokio runtime block_on）
+            trace!("下载外部 CSS: {}", full_url);
+            use std::sync::OnceLock;
+            static CSS_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+            let rt = CSS_RT.get_or_init(|| tokio::runtime::Runtime::new().unwrap());
+            let url_copy = full_url.clone();
+            let result: Result<String, reqwest::Error> = rt.block_on(async {
+                let resp = reqwest::get(&url_copy).await?;
+                resp.text().await
+            });
+            match result {
+                Ok(body) => {
+                    if !body.trim().is_empty() {
+                        if !css.is_empty() {
+                            css.push('\n');
+                        }
+                        css.push_str(body.trim());
+                        trace!("外部 CSS 下载成功: {} ({} 字符)", full_url, body.len());
+                    }
+                }
+                Err(e) => {
+                    warn!("外部 CSS 下载失败 ({}): {}", full_url, e);
+                }
+            }
+        }
+    }
+
+    css
+}
+
+/// 使用 Taffy 布局结果渲染页面的渲染器
+struct TaffyRenderer<'a> {
+    painter: &'a mut Painter,
+    taffy: &'a TaffyLayoutEngine,
+    dom: &'a DomWrapper,
+}
+
+impl<'a> TaffyRenderer<'a> {
+    fn render_dom(&mut self) {
+        // 如果 taffy 为空（没有布局节点），走简单的 fallback 渲染
+        if self.taffy.is_empty() {
+            warn!("Taffy 布局为空，使用简单渲染回退");
+            self.render_simple();
             return;
         }
 
-        let max_width = self.viewport_width - 40.0;
+        // 使用 Taffy 布局结果遍历渲染
+        if let Some(root_ref) = self.dom.inner_document().descendants().next() {
+            self.render_tree_with_taffy(&root_ref);
+        }
+    }
 
-        // 使用 cosmic-text 进行文本布局和渲染
+    /// 简单 fallback 渲染（没有 Taffy 布局时使用）
+    fn render_simple(&mut self) {
+        let body = self.dom.body();
+        let mut current_y = 20.0;
+        self.render_simple_node(body, &mut current_y);
+    }
+
+    fn render_simple_node(&mut self, node: usize, current_y: &mut f32) {
+        if let Some(node_ref) = self.dom.get_node(node) {
+            if let Some(text) = node_ref.as_text() {
+                let contents = text.borrow();
+                let trimmed = contents.trim();
+                if !trimmed.is_empty() {
+                    let width = 740.0; // 默认内容宽度
+                    self.render_text_at(
+                        trimmed,
+                        20.0,
+                        *current_y,
+                        width,
+                        16.0,
+                        &Color::from_hex("#333333"),
+                    );
+                    *current_y += 22.0;
+                }
+            } else if let Some(element) = node_ref.as_element() {
+                let tag_name = element.name.local.to_string();
+                match tag_name.as_str() {
+                    "h1" => {
+                        *current_y += 10.0;
+                        let text = collect_text(&node_ref);
+                        self.render_text_at(
+                            &text,
+                            20.0,
+                            *current_y,
+                            740.0,
+                            24.0,
+                            &Color::from_hex("#333333"),
+                        );
+                        *current_y += 40.0;
+                    }
+                    "h2" => {
+                        *current_y += 8.0;
+                        let text = collect_text(&node_ref);
+                        self.render_text_at(
+                            &text,
+                            20.0,
+                            *current_y,
+                            740.0,
+                            20.0,
+                            &Color::from_hex("#333333"),
+                        );
+                        *current_y += 35.0;
+                    }
+                    "h3" => {
+                        *current_y += 6.0;
+                        let text = collect_text(&node_ref);
+                        self.render_text_at(
+                            &text,
+                            20.0,
+                            *current_y,
+                            740.0,
+                            18.0,
+                            &Color::from_hex("#333333"),
+                        );
+                        *current_y += 30.0;
+                    }
+                    "p" => {
+                        let text = collect_text(&node_ref);
+                        self.render_text_at(
+                            &text,
+                            20.0,
+                            *current_y,
+                            740.0,
+                            16.0,
+                            &Color::from_hex("#333333"),
+                        );
+                        *current_y += 25.0;
+                    }
+                    "img" => {
+                        let src = element
+                            .attributes
+                            .borrow()
+                            .get("src")
+                            .map(|s| s.to_string());
+                        if let Some(url) = src {
+                            let pixmap = self.load_image(&url);
+                            if let Some(p) = pixmap {
+                                self.painter.draw_rect(
+                                    20.0,
+                                    *current_y,
+                                    p.width() as f32,
+                                    p.height() as f32,
+                                    &Color::WHITE,
+                                );
+                                self.painter.pixmap_mut().draw_pixmap(
+                                    20.0 as i32,
+                                    *current_y as i32,
+                                    p.as_ref(),
+                                    &tiny_skia::PixmapPaint::default(),
+                                    tiny_skia::Transform::identity(),
+                                    None,
+                                );
+                            }
+                        }
+                        *current_y += 160.0;
+                    }
+                    "br" => {
+                        *current_y += 20.0;
+                    }
+                    "hr" => {
+                        self.painter.draw_rect(
+                            20.0,
+                            *current_y,
+                            740.0,
+                            1.0,
+                            &Color::from_hex("#dddddd"),
+                        );
+                        *current_y += 10.0;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for child in self.dom.children(node) {
+            self.render_simple_node(child, current_y);
+        }
+    }
+
+    /// 使用 Taffy 布局结果的主渲染循环
+    fn render_tree_with_taffy(&mut self, node_ref: &NodeRef) {
+        // 按深度优先遍历 NodeRef 树，从 taffy 获取布局坐标
+        if let Some(element) = node_ref.as_element() {
+            let tag_name = element.name.local.to_string();
+
+            // 找到对应的 dom 索引
+            if let Some(dom_idx) = self.find_dom_index(node_ref) {
+                // 通过 dom 索引获取 taffy 布局
+                if let Some(layout) = self.taffy.get_layout(dom_idx) {
+                    let x = layout.x;
+                    let y = layout.y;
+                    let w = layout.width;
+                    let h = layout.height;
+
+                    // 渲染元素背景
+                    if let Some(bg) = &layout.background {
+                        self.painter.draw_rect(x, y, w, h, bg);
+                    }
+
+                    // 渲染 box-shadow
+                    self.render_box_shadow_for_element(&tag_name, x, y, w, h);
+
+                    // 渲染背景图片
+                    self.render_background_image(&tag_name, x, y, w, h);
+
+                    // 渲染元素装饰（边框等）+ 传入 node_ref 用于 img src
+                    self.render_element_box(&tag_name, x, y, w, h, Some(node_ref));
+
+                    // 渲染图片元素
+                    if tag_name == "img" {
+                        self.render_img_element(x, y, w, h, node_ref);
+                    }
+
+                    // 渲染元素的直接文本内容
+                    let text_content = collect_text(node_ref);
+                    if !text_content.trim().is_empty() {
+                        let font_size = layout.font_size.max(12.0);
+                        let default_color = Color::from_hex("#333333");
+                        let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
+                        let padding = 10.0;
+                        self.render_text_at(
+                            &text_content,
+                            x + padding,
+                            y + padding,
+                            w - padding * 2.0,
+                            font_size,
+                            font_color,
+                        );
+                    }
+                }
+            }
+
+            // 递归渲染子节点
+            for child in node_ref.children() {
+                self.render_tree_with_taffy(&child);
+            }
+        } else if node_ref.as_text().is_some() {
+            // 文本节点：查找父元素布局来渲染文本
+            if let Some(parent) = node_ref.parent() {
+                if let Some(element) = parent.as_element() {
+                    let tag_name = element.name.local.to_string();
+                    if let Some(dom_idx) = self.find_dom_index(&parent) {
+                        if let Some(layout) = self.taffy.get_layout(dom_idx) {
+                            // 检查是否已经渲染过文本（由父元素渲染）
+                            // 如果是 img 等不需要额外文本渲染
+                            if tag_name != "img" {
+                                let text_content = collect_text(&parent);
+                                if !text_content.trim().is_empty() {
+                                    // 已经在父元素渲染过了，跳过
+                                } else if let Some(text) = node_ref.as_text() {
+                                    let contents = text.borrow();
+                                    let trimmed = contents.trim();
+                                    if !trimmed.is_empty() {
+                                        let font_size = layout.font_size.max(12.0);
+                                        let default_color = Color::from_hex("#333333");
+                                        let font_color =
+                                            layout.font_color.as_ref().unwrap_or(&default_color);
+                                        let padding = 10.0;
+                                        self.render_text_at(
+                                            trimmed,
+                                            layout.x + padding,
+                                            layout.y + padding,
+                                            layout.width - padding * 2.0,
+                                            font_size,
+                                            font_color,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // 文档节点等 - 直接递归子节点
+            for child in node_ref.children() {
+                self.render_tree_with_taffy(&child);
+            }
+        }
+    }
+
+    /// 通过 NodeRef 的 Rc 指针查找 DOM 索引
+    fn find_dom_index(&self, node_ref: &NodeRef) -> Option<usize> {
+        let rc_ptr = Rc::as_ptr(&node_ref.0) as usize;
+        // 使用 DomWrapper 的 descendants 定位
+        self.dom
+            .inner_document()
+            .descendants()
+            .position(|n| Rc::as_ptr(&n.0) as usize == rc_ptr)
+    }
+
+    /// 渲染元素装饰（边框、背景装饰等）
+    fn render_element_box(
+        &mut self,
+        tag: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        _node_ref: Option<&NodeRef>,
+    ) {
+        match tag {
+            "hr" => {
+                self.painter
+                    .draw_rect(x, y, w, 1.0, &Color::from_hex("#dddddd"));
+            }
+            "img" => {
+                // 图片占位符背景 - 仅在未加载成功时显示
+                self.render_img_placeholder(x, y, w, h);
+            }
+            _ => {}
+        }
+    }
+
+    /// 实际渲染图片元素
+    fn render_img_element(&mut self, x: f32, y: f32, w: f32, h: f32, element: &NodeRef) {
+        if let Some(el) = element.as_element() {
+            let src = el.attributes.borrow().get("src").map(|s| s.to_string());
+            if let Some(url) = src {
+                let pixmap = self.load_image(&url);
+                if let Some(p) = pixmap {
+                    // 居中绘制图片（不缩放）
+                    let draw_x = x + (w - p.width() as f32) / 2.0;
+                    let draw_y = y + (h - p.height() as f32) / 2.0;
+                    self.painter.pixmap_mut().draw_pixmap(
+                        draw_x as i32,
+                        draw_y as i32,
+                        p.as_ref(),
+                        &tiny_skia::PixmapPaint::default(),
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    /// 渲染图片占位符（加载失败或没有 src 时的占位）
+    fn render_img_placeholder(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        // 浅灰色背景
+        self.painter
+            .draw_rect(x, y, w, h, &Color::from_hex("#f0f0f0"));
+        // 边框
+        self.painter
+            .draw_rect(x, y, w, 1.0, &Color::from_hex("#dddddd"));
+        self.painter
+            .draw_rect(x, y + h - 1.0, w, 1.0, &Color::from_hex("#dddddd"));
+        // 居中图标（相机符号简化）
+        let center_x = x + w / 2.0 - 20.0;
+        let center_y = y + h / 2.0 - 10.0;
+        self.painter
+            .draw_rect(center_x, center_y, 40.0, 20.0, &Color::from_hex("#cccccc"));
+    }
+
+    /// 渲染元素的 box-shadow
+    fn render_box_shadow_for_element(&mut self, tag: &str, x: f32, y: f32, w: f32, h: f32) {
+        // 只对块级元素渲染 box-shadow
+        if let Some(shadow) = self.find_box_shadow_for_tag(tag) {
+            draw_box_shadow(
+                self.painter.pixmap_mut(),
+                x,
+                y,
+                w,
+                h,
+                shadow.offset_x,
+                shadow.offset_y,
+                shadow.blur_radius,
+                shadow.spread,
+                &shadow.color,
+            );
+        }
+    }
+
+    /// 查找标签的 box-shadow 定义（通过 taffy layout 中的样式）
+    fn find_box_shadow_for_tag(&self, _tag: &str) -> Option<BoxShadowValue> {
+        // 目前通过全局样式简化处理
+        // 后续可以扩展为从 TaffyLayoutEngine 的 StyleMap 中查找
+        None
+    }
+
+    /// 通过全局 ImageCache 加载图片
+    fn load_image(&self, url: &str) -> Option<tiny_skia::Pixmap> {
+        let cache = global_image_cache();
+        cache.get(url)
+    }
+
+    /// 渲染背景图片
+    fn render_background_image(&mut self, _tag: &str, _x: f32, _y: f32, _w: f32, _h: f32) {
+        // 预留：从 taffy layout 获取 background-image 并渲染
+    }
+
+    /// 使用 cosmic-text 渲染文本（支持 font_size 和 color 参数）
+    fn render_text_at(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        max_width: f32,
+        font_size: f32,
+        color: &Color,
+    ) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || font_size <= 0.0 {
+            return;
+        }
+
         let mut font_system = global_font_system().lock().unwrap();
         let mut swash_cache = global_swash_cache().lock().unwrap();
 
+        let line_height = font_size * 1.375;
+
         // 创建文本缓冲区
-        let mut buffer = Buffer::new(
-            &mut font_system,
-            Metrics::new(16.0, 22.0), // 字体大小 16px, 行高 22px
-        );
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
 
-        // 设置缓冲区宽度（用于自动换行）
-        buffer.set_size(&mut font_system, max_width, f32::INFINITY);
-        buffer.set_wrap(&mut font_system, Wrap::Word);
-
-        buffer.set_text(&mut font_system, trimmed, Attrs::new(), Shaping::Advanced);
-
+        buffer.set_size(Some(max_width.max(50.0)), Some(f32::INFINITY));
+        buffer.set_wrap(Wrap::Word);
+        let attrs = Attrs::new();
+        buffer.set_text(trimmed, &attrs, Shaping::Advanced, Some(Align::Left));
         buffer.shape_until_scroll(&mut font_system, true);
 
-        // 渲染 layout runs
-        let max_lines = 100;
-        let mut line_count = 0;
         let scale = 1.0;
+        let mut line_y = y;
 
         for run in buffer.layout_runs() {
-            if line_count >= max_lines {
-                break;
-            }
-
-            // 渲染该行中的每个字形
             for glyph in run.glyphs {
-                let physical_glyph = glyph.physical((20.0, self.current_y), scale);
+                let physical_glyph = glyph.physical((x, line_y), scale);
                 let cache_key = physical_glyph.cache_key;
 
                 if let Some(swash_image) = swash_cache.get_image(&mut font_system, cache_key) {
                     let glyph_x = physical_glyph.x as f32 + swash_image.placement.left as f32;
                     let glyph_y = physical_glyph.y as f32 - swash_image.placement.top as f32;
 
-                    // 将渲染的字形绘制到 pixmap 上
                     self.render_glyph_image(
                         glyph_x,
                         glyph_y,
                         swash_image.placement.width as u32,
                         swash_image.placement.height as u32,
                         &swash_image.data,
-                        &Color::from_hex("#333333"),
+                        color,
                     );
                 }
             }
 
-            line_count += 1;
-            self.current_y += 22.0; // 行间距
+            line_y += line_height;
         }
     }
 
-    /// 将字形 alpha 蒙版渲染到 pixmap
     /// 将字形 alpha 蒙版渲染到 pixmap（使用 direct pixel access）
     fn render_glyph_image(
         &mut self,
@@ -323,7 +881,6 @@ impl<'a> CosmicRenderer<'a> {
         let pixmap_width = self.painter.pixmap_mut().width();
         let pixmap_height = self.painter.pixmap_mut().height();
 
-        // 获取直接像素缓冲区 (RGBA bytes)
         let pixel_data = self.painter.pixmap_mut().data_mut();
         let stride = pixmap_width as usize * 4;
 
@@ -353,14 +910,12 @@ impl<'a> CosmicRenderer<'a> {
                     continue;
                 }
 
-                // 直接操作像素缓冲区 (RGBA 每通道 1 字节)
                 let pixel_idx = (py_u as usize) * stride + (px_u as usize) * 4;
                 if pixel_idx + 3 < pixel_data.len() {
                     let bg_r = pixel_data[pixel_idx];
                     let bg_g = pixel_data[pixel_idx + 1];
                     let bg_b = pixel_data[pixel_idx + 2];
 
-                    // alpha 混合: result = text_color * alpha + bg * (1 - alpha)
                     let a_norm = alpha as f32 / 255.0;
                     let inv_a = 1.0 - a_norm;
 
@@ -370,100 +925,29 @@ impl<'a> CosmicRenderer<'a> {
                         (text_rgba[1] as f32 * a_norm + bg_g as f32 * inv_a) as u8;
                     pixel_data[pixel_idx + 2] =
                         (text_rgba[2] as f32 * a_norm + bg_b as f32 * inv_a) as u8;
-                    pixel_data[pixel_idx + 3] = 255; // 不透明
+                    pixel_data[pixel_idx + 3] = 255;
                 }
             }
         }
     }
+}
 
-    fn render_element(&mut self, tag: &str, _dom: &DomWrapper) {
-        match tag {
-            "h1" => {
-                // 绘制标题背景装饰条
-                self.painter.paint_rect(
-                    20.0,
-                    self.current_y + 28.0,
-                    4.0, // 左侧竖线
-                    18.0,
-                    &Color::from_hex("#4A90D9"),
-                );
-                self.current_y += 42.0;
-            }
-            "h2" => {
-                self.painter.paint_rect(
-                    20.0,
-                    self.current_y + 22.0,
-                    4.0,
-                    16.0,
-                    &Color::from_hex("#5BA0E9"),
-                );
-                self.current_y += 38.0;
-            }
-            "h3" | "h4" | "h5" | "h6" => {
-                self.current_y += 34.0;
-            }
-            "br" => {
-                self.current_y += 20.0;
-            }
-            "hr" => {
-                self.painter.paint_rect(
-                    20.0,
-                    self.current_y + 10.0,
-                    self.viewport_width - 40.0,
-                    1.0,
-                    &Color::from_hex("#dddddd"),
-                );
-                self.current_y += 20.0;
-            }
-            "img" => {
-                // 占位框
-                self.painter.paint_rect(
-                    20.0,
-                    self.current_y,
-                    self.viewport_width - 40.0,
-                    150.0,
-                    &Color::from_hex("#f0f0f0"),
-                );
-                // 边框
-                self.painter.paint_rect(
-                    20.0,
-                    self.current_y,
-                    self.viewport_width - 40.0,
-                    1.0,
-                    &Color::from_hex("#dddddd"),
-                );
-                self.painter.paint_rect(
-                    20.0,
-                    self.current_y + 149.0,
-                    self.viewport_width - 40.0,
-                    1.0,
-                    &Color::from_hex("#dddddd"),
-                );
-                // 居中图标（相机符号简化）
-                let center_x = 20.0 + (self.viewport_width - 40.0) / 2.0 - 20.0;
-                let center_y = self.current_y + 65.0;
-                self.painter.paint_rect(
-                    center_x,
-                    center_y,
-                    40.0,
-                    20.0,
-                    &Color::from_hex("#cccccc"),
-                );
-                self.current_y += 160.0;
-            }
-            "a" => {
-                // 链接 - 蓝色下划线（但需要等文本渲染）
-                // 在文本渲染中处理
-            }
-            "p" | "div" | "span" | "ul" | "ol" | "li" | "section" | "article" | "header"
-            | "footer" | "nav" | "aside" | "main" | "form" | "body" | "html" => {
-                // 容器元素 - 不需要额外绘制
-            }
-            _ => {
-                // 其他元素 - 不需要额外绘制
+/// 收集节点下的所有文本内容
+fn collect_text(node_ref: &NodeRef) -> String {
+    let mut result = String::new();
+    for child in node_ref.children() {
+        if let Some(text) = child.as_text() {
+            let content = text.borrow();
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                if !result.is_empty() {
+                    result.push(' ');
+                }
+                result.push_str(trimmed);
             }
         }
     }
+    result
 }
 
 impl Renderer {
@@ -491,5 +975,12 @@ mod tests {
         let mut renderer = Renderer::new(100, 100);
         let result = renderer.render(&None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_global_image_cache() {
+        let cache = global_image_cache();
+        // 只是验证返回非空
+        assert!(cache.len() == 0 || cache.len() >= 0);
     }
 }

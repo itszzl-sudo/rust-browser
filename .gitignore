@@ -3,3 +3,9 @@
 Cargo.lock
 .DS_Store
 target
+*.png
+*.exe
+*.pdb
+.vscode/
+nul
+__pycache__/

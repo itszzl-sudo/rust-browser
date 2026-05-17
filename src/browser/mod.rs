@@ -7,10 +7,10 @@ pub mod page;
 pub mod tabs;
 pub mod ui;
 
-pub use engine::{BrowserEngine, Document, BrowserError};
+pub use engine::{BrowserEngine, BrowserError, Document};
 pub use page::Page;
 pub use tabs::{Tab, TabManager};
-pub use ui::{ChromeUiState, ChromeButton, MouseEvent, MouseEventType};
+pub use ui::{ChromeButton, ChromeUiState, MouseEvent, MouseEventType};
 
 use log::{debug, info};
 use std::path::Path;
@@ -100,7 +100,8 @@ impl Browser {
 
         let active_idx = self.tab_manager.active_index();
         if active_idx >= self.engines.len() {
-            self.engines.push(BrowserEngine::new(self.width, self.height)?);
+            self.engines
+                .push(BrowserEngine::new(self.width, self.height)?);
         }
 
         self.engines[active_idx].navigate(url)?;
@@ -115,7 +116,8 @@ impl Browser {
         let active_idx = self.tab_manager.active_index();
 
         while self.engines.len() <= active_idx {
-            self.engines.push(BrowserEngine::new(self.width, self.height)?);
+            self.engines
+                .push(BrowserEngine::new(self.width, self.height)?);
         }
 
         Ok(())
@@ -165,7 +167,7 @@ impl Browser {
         self.tab_manager.reload_url()
     }
 
-    pub fn evaluate(&self, script: &str) -> Result<String, BrowserError> {
+    pub fn evaluate(&mut self, script: &str) -> Result<String, BrowserError> {
         let active_idx = self.tab_manager.active_index();
         if active_idx < self.engines.len() {
             self.engines[active_idx].execute_js(script)
@@ -184,7 +186,8 @@ impl Browser {
     }
 
     pub fn url(&self) -> &str {
-        self.tab_manager.active_tab()
+        self.tab_manager
+            .active_tab()
             .map(|t| t.url.as_str())
             .unwrap_or("about:blank")
     }
@@ -198,7 +201,12 @@ impl Browser {
     }
 
     pub fn content_area(&self) -> (u32, u32, u32, u32) {
-        (0, DEFAULT_UI_HEIGHT, self.width, self.height.saturating_sub(DEFAULT_UI_HEIGHT))
+        (
+            0,
+            DEFAULT_UI_HEIGHT,
+            self.width,
+            self.height.saturating_sub(DEFAULT_UI_HEIGHT),
+        )
     }
 
     pub fn screenshot(&mut self, path: &Path) -> Result<(), BrowserError> {
@@ -243,8 +251,8 @@ impl Browser {
         } else {
             // 使用实际视口尺寸渲染备用图像
             let (width, height) = (self.width, self.height);
-            let mut p = tiny_skia::Pixmap::new(width, height).ok_or_else(|| 
-                BrowserError::RenderError("无法创建像素图".to_string()))?;
+            let mut p = tiny_skia::Pixmap::new(width, height)
+                .ok_or_else(|| BrowserError::RenderError("无法创建像素图".to_string()))?;
             let _ = p.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
             Ok(p.encode_png().unwrap_or_default())
         }
