@@ -511,7 +511,76 @@ bridge.handle_click(100.0, 200.0);
 
 ---
 
-## 十四、未完成工作
+## 十四、已知问题与限制
+
+### 布局引擎限制（taffy 0.10 版本上限）
+
+| 缺失能力 | 原因 | 影响 |
+|---------|------|------|
+| `order` | taffy 0.10 `Style` 无此字段 | Flex 子项无法重排序 |
+| `overflow: hidden/scroll` | taffy 0.10 无对应类型 | 内容溢出无法裁剪 |
+| `white-space: nowrap` | 同上 | 文本无法禁止换行 |
+| `position: fixed/sticky` | taffy 0.10 `Position` 枚举缺少对应变体 | 固定/粘性定位不可用 |
+| `gap` 在 grid 布局中 | taffy 0.10 grid gap 支持不完整 | Grid 间距可能异常 |
+
+### 渲染层缺失（布局层已就绪，渲染器未实现）
+
+| 缺失能力 | 说明 |
+|---------|------|
+| `text-decoration` | 下划线/删除线等文本装饰 |
+| `text-transform` | 大小写转换 |
+| `letter-spacing` / `word-spacing` | 字间距/词间距 |
+| `border-color` / `border-style` | 边框颜色和样式独立控制 |
+| `border-radius` | 已在 painter 层支持，但未从 CSS 解析 |
+| `box-shadow` | 已在 painter 层支持，但仅从 style 标签解析 |
+| `background-size` / `background-repeat` | 背景图片尺寸和重复模式 |
+| `outline` | 轮廓线 |
+| `list-style` | 列表标记（bullet） |
+| `opacity` | 元素透明度 |
+| `cursor` | 鼠标样式 |
+
+### 测试相关
+
+```
+browser_process::interfaces::tests::test_render_result_message_roundtrip
+  → IPC 二进制编码 test 与当前实现不一致，不影响运行时
+
+storage::local_storage::tests::test_remove_item
+storage::local_storage::tests::test_set_and_get_item
+storage::local_storage::tests::test_used_bytes_tracking
+  → localStorage 实现有 bug，已弃用 storage 模块
+```
+
+### JS 引擎限制
+
+| 限制 | 说明 |
+|------|------|
+| Boa `fetch()` 同步阻塞 | 使用 `block_on` 执行异步请求，会阻塞 JS 引擎线程 |
+| BOM/DOM API 不完整 | 仅注入最小 polyfill（console/document/location/navigator/Event） |
+| `fetch()` options | 仅支持 method 参数，不支持 body/headers 等 |
+| `XMLHttpRequest` | 未实现 |
+
+### 多进程架构限制
+
+| 限制 | 说明 |
+|------|------|
+| 渲染器线程首次导航与 IPC 导航重复 | 渲染器启动时自动加载 URL，主线程 navigate() 会发送第二条 IPC 导致重复加载（已修复：首帧不调 navigate） |
+| Mojo IPC 单线程 | IPC 管道基于 `Mutex<VecDeque>`，非高性能共享内存 |
+| 渲染器进程内存隔离 | 当前使用线程而非独立进程，无沙箱隔离 |
+
+### 其他已知问题
+
+| 问题 | 说明 |
+|------|------|
+| eframe/egui GUI 编译慢 | wgpu/naga/Vulkan 后端编译耗时较长 |
+| 增量编译链接错误 | Windows 下偶发 LNK 链接失败，`cargo clean` 可解决 |
+| `env_logger` 需手动初始化 | example 中未调用 `env_logger::init()`，`log::info!` 不可见 |
+| Windows 字体回退 | `mstmc.ttf` 无法加载（非致命，仅 warning） |
+| 长截图视口恢复 | 长页面渲染后 `pixmap` 恢复原始大小，仅供截图用途 |
+
+---
+
+## 十五、未完成工作
 
 ### 短期（<= 3 天）
 
