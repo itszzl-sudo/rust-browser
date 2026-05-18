@@ -157,18 +157,36 @@ bridge.handle_click(100.0, 200.0);
 | resvg | 0.47 | SVG 渲染 |
 | reqwest | 0.12 | HTTP 客户端 |
 | image | 0.25 | 图片解码 |
-| obscura-js | 本地 | JS 引擎（V8/deno_core） |
-| obscura-dom | 本地 | DOM 树 |
-| eframe/egui | 0.34 | GUI 窗口 |
+| boa_engine | 0.21 | JS 引擎（纯 Rust，默认） |
+| obscura-js | 本地 | JS 引擎（V8/deno_core，可选） |
+| obscura-dom | 本地 | DOM 树（仅 obscura-js 使用） |
+| regex | 1.11 | 预扫描 HTML |
+| eframe/egui | 0.34 | GUI 窗口（可选） |
 
 ## 构建
 
+## Feature 矩阵
+
+| feature | 说明 |
+|---------|------|
+| `boa`（默认） | Boa JS 引擎（纯 Rust，0 原生依赖） |
+| `js` | obscura-js（V8/deno_core） |
+| `gui`（默认） | GUI 窗口（eframe/egui） |
+
+> `boa` 和 `js` 互斥，不能同时启用。
+
 ```bash
-# 标准构建
+# 默认构建（Boa JS + GUI）
 cargo build
 
-# 带 JS 引擎构建
-cargo build --features js
+# 调试模式（opt-level=1，平衡编译速度和运行性能）
+cargo build --profile dev
+
+# 无 GUI 纯 lib 构建
+cargo check -p rust-browser --lib --no-default-features
+
+# V8 JS 引擎构建
+cargo build --features js,gui
 
 # 测试
 cargo test
@@ -180,7 +198,7 @@ cargo test -- image_cache border svg taffy renderer text css_engine bridge
 cargo run --example baidu_test
 ```
 
-当前状态：渲染相关测试 **34/34 通过**，全量测试 **99/103 通过**（4 个 storage/IPC 测试失败，与渲染无关）。
+当前状态：渲染相关测试 **34/34 通过**，全量测试 **107/111 通过**（4 个 storage/IPC 测试失败，与渲染无关）。
 
 ## 许可证
 

@@ -1,6 +1,6 @@
 # Rust Browser 架构文档
 
-> 最后更新：2026-05-17
+> 最后更新：2026-05-17（v2：新增 Boa JS 引擎双后端、profile.dev 配置、建筑式渲染美化）
 >
 > 本文档面向**项目参与者**，记录关键架构决策、模块职责、技术选型和未完成工作。
 
@@ -175,7 +175,38 @@ HTML → kuchiki DOM → StyleMap (tag/class/id → CSS decls)
 
 ---
 
-## 五、关键依赖
+## 五、JS 引擎双后端
+
+JsEngine 通过 feature 切换两个后端，对外暴露统一 API：
+
+```rust
+// 无论哪个后端，外部代码都这样用：
+let mut engine = JsEngine::new();
+engine.initialize("https://example.com").unwrap();
+let result = engine.evaluate("1 + 2").unwrap();
+```
+
+### Boa 后端（`features = ["boa"]`，默认）
+
+- **纯 Rust**，0 外部原生依赖，编译即可运行
+- `Source::from_bytes()` 解析 JS，`Context::eval()` 执行
+- 初始化时注入简化的 `document`、`window`、`console`、`Event` 等全局对象
+- 没有真实 DOM 绑定，`dispatchEvent()` 为 no-op
+
+### obscura-js 后端（`features = ["js"]`）
+
+- 基于 **deno_core/V8**，需要 V8 编译环境和 `snapshot`
+- 通过 `op_dom()` op 连接 `obscura_dom::DomTree`，**有真实 DOM 绑定**
+- 支持 `document.getElementById()`、`querySelector()` 等完整 DOM API
+- `dispatchEvent()` 真实触发节点事件
+
+### feature 互斥
+
+`boa` 和 `js` 互斥。如果都不启用，`JsEngine::evaluate()` 返回 `Err`。
+
+---
+
+## 六、关键依赖
 
 | 库 | 版本 | 用途 | 来源 |
 |----|------|------|------|
@@ -185,13 +216,33 @@ HTML → kuchiki DOM → StyleMap (tag/class/id → CSS decls)
 | `kuchiki` | 0.12（本地源码，kuchikikiki） | HTML 解析（基于 html5ever） | 底层框架 |
 | `selectors` | 0.27 | CSS 选择器匹配引擎（Mozilla Servo） | 开源组件（适配 kuchiki） |
 | `cssparser` | 0.35 | CSS 语法解析 | 开源组件 |
-| `obscura-js` | 本地 | JS 引擎（deno_core/V8），可选 | 开源组件 |
-| `obscura-dom` | 本地 | DOM 树（与 kuchiki 不互通，两套 DOM 并存） | 开源组件 |
+| `obscura-js` | 本地 | JS 引擎（deno_core/V8），`features = ["js"]` | 开源组件 |
+| `obscura-dom` | 本地 | DOM 树（与 kuchiki 不互通），仅 `features = ["js"]` 时使用 | 开源组件 |
+| `boa_engine` | 0.21 | JS 引擎（纯 Rust，无外部依赖），`features = ["boa"]`（**默认**） | 开源组件 |
 | `resvg` | 0.47 | SVG 渲染 | 开源组件 |
 | `reqwest` | 0.12 | HTTP 客户端 | 底层框架 |
 | `image` | 0.25 | 图片解码 | 底层框架 |
 | `regex` | 1.11 | 预扫描 HTML 资源 URL | 开源组件 |
 | `eframe/egui` | 0.34 | GUI 窗口（可选，默认带 gui feature） | 底层框架 |
+
+### Feature 矩阵
+
+```
+default = ["boa", "gui"]
+boa = ["boa_engine", "boa_gc"]  # Boa JS 引擎（纯 Rust，默认）
+js  = ["obscura-js"]             # obscura-js（V8/deno_core）
+gui = ["eframe", "egui"]         # GUI 窗口
+```
+
+| 命令 | JS 引擎 | GUI |
+|------|---------|-----|
+| `cargo build` | **Boa**（纯 Rust） | ✅ |
+| `cargo build --no-default-features` | 无 | ❌ |
+| `cargo build --features js` | **V8**（obscura-js） | ❌ |
+| `cargo build --features boa,gui` | Boa | ✅ |
+| `cargo build --features js,gui` | V8 | ✅ |
+
+> `boa` 和 `js` 互斥，不能同时启用。
 
 ### 版本冲突注意
 
@@ -212,7 +263,8 @@ Windows 上 `eframe 0.34` → `wgpu` → `wgpu-hal` 与 `windows` crate 版本�
 | HTML 解析 | **kuchiki 0.12** | 底层框架 | — |
 | HTTP 网络 | **reqwest 0.12** | 底层框架 | — |
 | 图片解码 | **image 0.25** | 底层框架 | — |
-| JS 引擎 | **obscura-js**（deno_core/V8） | 开源组件 | ~60 行封装 |
+| JS 引擎（默认） | **Boa Engine 0.21**（纯 Rust） | 开源组件 | ~260 行封装 |
+| JS 引擎（V8） | **obscura-js**（deno_core/V8） | 开源组件 | ~60 行封装 |
 | 图片网络加载 + 缓存 | 自研 | reqwest + image + HashMap | ~360 行 |
 | CSS sprite 裁剪 | 自研 | image::crop_imm + Pixmap::clone_rect | ~20 行 |
 | border 绘制 + 圆角 | 自研 | tiny-skia PathBuilder + stroke_path | ~180 行 |
@@ -501,13 +553,19 @@ bridge.handle_click(100.0, 200.0);
 ## 十五、构建与测试
 
 ```bash
-# 标准构建（无 JS 引擎，无 GUI，纯 lib）
+# 默认构建（Boa JS + GUI）
+cargo build
+
+# 纯 lib 构建（不依赖 GUI，避开 Windows wgpu 问题）
 cargo check -p rust-browser --lib --no-default-features
 
-# 带 JS 引擎
+# 带 V8 JS 引擎
 cargo check -p rust-browser --lib --features js
 
-# 测试（渲染相关 34/34 通过）
+# 调试构建（opt-level = 1，平衡编译速度和运行性能）
+cargo build --profile dev
+
+# 测试
 cargo test -p rust-browser --lib --no-default-features -- image_cache border svg taffy renderer text css_engine bridge loader
 
 # 全量测试（107/111 通过，4 个已知失败）
@@ -539,4 +597,6 @@ d5d0bcc  line-height CSS属性支持 + README更新
 40b81af  布局引擎完整版 + CSS选择器(selectors) + border/box-shadow + 图片缓存/网络加载 + resvg SVG + JS引擎接入 + hit testing + 事件IPC + 外部CSS加载 + WebNativeBridge
 921afab  多进程ipc，多线程queue
 81f778f  多进程ipc，多线程queue
+7e59f53  精美渲染效果: 圆角输入框/按钮/标题装饰/渐变分割线
+bebff6b  feature隔离: Boa JS引擎(默认)+obscura-js(V8)双后端, profile.dev配置
 ```
