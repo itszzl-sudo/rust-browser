@@ -1,6 +1,6 @@
 # Rust Browser 架构文档
 
-> 最后更新：2026-05-19（v3：CSS布局完善、bridge独立trait、headless模式、长页面截图）
+> 最后更新：2026-05-19（v3：CSS布局完善、bridge独立trait、headless模式、长页面截图、jrust集成）
 >
 > 本文档面向**项目参与者**，记录关键架构决策、模块职责、技术选型和未完成工作。
 
@@ -12,12 +12,59 @@ Rust Browser 是一个用 Rust 从零构建的轻量级浏览器引擎，核心�
 
 1. **Web → Native 转换工具**：配合一个将 Vite 打包产物翻译为 Rust 代码的工具，Rust Browser 提供渲染、事件捕获、输入处理的运行时能力，实现完整的 web-to-native 转换
 2. **演示/实验**：验证 Rust 在浏览器引擎领域的能力
+3. **Headless 渲染**：无 GUI、无 JS 引擎的纯渲染模式，用于 SSR、自动化测试、jrust-runtime 集成
 
 项目使用多进程架构（类似 Chrome），通过 Mojo IPC 通信。
 
 ---
 
-## 二、多进程架构
+## 二、运行模式
+
+### 2.1 默认模式 (GUI + JS)
+
+```bash
+cargo run
+```
+
+特性:
+- eframe/egui GUI 窗口
+- Boa JS 引擎 (纯 Rust)
+- 完整浏览器功能
+
+### 2.2 Headless 模式 (无 GUI、无 JS)
+
+```bash
+cargo build --no-default-features --features headless
+```
+
+特性:
+- 无 eframe/egui GUI 依赖
+- 无 Boa/obscura-js JS 引擎
+- 只保留 DOM 解析、CSS 布局、渲染核心
+- WebNativeBridge trait 可用
+
+用途:
+- 服务器端渲染 (SSR)
+- 自动化测试
+- jrust-runtime 集成
+- CI/CD 环境截图
+
+### 2.3 jrust-runtime 集成
+
+在 `jrust-browser/Cargo.toml` 中:
+
+```toml
+[dependencies]
+rust-browser = { 
+    path = "path/to/rust-browser", 
+    default-features = false, 
+    features = ["headless"] 
+}
+```
+
+---
+
+## 三、多进程架构
 
 ```
 ┌─────────────────────────────────────────────────────┐

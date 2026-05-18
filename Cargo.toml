@@ -67,14 +67,30 @@ serde_json = "1.0"
 default = ["boa", "gui"]
 
 # JS 引擎后端
-js = ["obscura-js"]
-boa = ["boa_engine", "boa_gc"]
+js = ["obscura-js"]           # obscura-js (V8/Deno 后端)
+boa = ["boa_engine", "boa_gc"] # Boa JS 引擎 (纯 Rust)
 
 # GUI 窗口模式
 gui = ["eframe", "egui"]
 
-# 无头模式：禁用首页加载、GUI、菜单栏、JS 引擎，只保留渲染核心 + bridge
-# 适合服务器端渲染和自动化测试
+# 无头模式：禁用 GUI 和 JS 引擎，只保留渲染核心 + bridge
+# 
+# 特性:
+# - 无 eframe/egui GUI 依赖
+# - 无 Boa/obscura-js JS 引擎
+# - 只保留 DOM 解析、CSS 布局、渲染核心
+# - WebNativeBridge trait 可用
+#
+# 用途:
+# - 服务器端渲染 (SSR)
+# - 自动化测试
+# - jrust-runtime 集成
+# - CI/CD 环境截图
+#
+# 使用方式:
+#   cargo build --no-default-features --features headless
+#   或在依赖中指定:
+#   rust-browser = { ..., default-features = false, features = ["headless"] }
 headless = []
 
 [profile.release]
