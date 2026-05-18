@@ -85,6 +85,8 @@ pub struct TaffyLayoutNode {
     pub line_height: f32,
     /// CSS font-weight（400=normal, 700=bold）
     pub font_weight: u16,
+    /// CSS border-radius（像素，0=无圆角）
+    pub border_radius: f32,
 }
 
 /// 完整的 taffy 布局引擎（完整版）
@@ -280,6 +282,7 @@ impl TaffyLayoutEngine {
                 bg_position_y: Self::determine_bg_position(&merged_decls).1,
                 line_height: self.determine_line_height(&merged_decls),
                 font_weight: self.determine_font_weight(&merged_decls),
+                border_radius: self.determine_border_radius(&merged_decls),
             };
 
             let layout_idx = self.layout_nodes.len();
@@ -1001,6 +1004,17 @@ impl TaffyLayoutEngine {
             }
         }
         400
+    }
+
+    /// 确定 border-radius
+    fn determine_border_radius(&self, decls: &[Declaration]) -> f32 {
+        if let Some(br) = get_declaration(decls, "border-radius") {
+            if let Some(px) = parse_length(&br) {
+                return px;
+            }
+        }
+        // 从 border 简写中提取（通常不包含 radius，但有些写法如 "border: 1px solid #ddd; border-radius: 8px"）
+        0.0
     }
 
     /// 确定 font-family（返回备选链，按优先级排序）

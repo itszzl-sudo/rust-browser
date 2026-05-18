@@ -782,9 +782,14 @@ impl<'a> TaffyRenderer<'a> {
                     // 检查当前节点是否为 hover 节点，如果是则应用 hover 样式覆盖
                     let is_hovered = Some(dom_idx) == self.taffy.hovered_node;
 
-                    // 渲染元素背景
+                    // 渲染元素背景（支持 border-radius）
                     if let Some(bg) = &layout.background {
-                        self.painter.draw_rect(x, y, w, h, bg);
+                        let br = layout.border_radius;
+                        if br > 0.0 && w > 0.0 && h > 0.0 {
+                            self.painter.draw_rounded_rect(x, y, w, h, br, bg);
+                        } else {
+                            self.painter.draw_rect(x, y, w, h, bg);
+                        }
                     }
 
                     // 渲染 box-shadow
