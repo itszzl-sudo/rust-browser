@@ -93,6 +93,10 @@ pub struct TaffyLayoutNode {
     pub border_style: String,
     /// CSS box-shadow 原始值
     pub box_shadow: Option<String>,
+    /// CSS background-size（cover/contain/px）
+    pub background_size: String,
+    /// CSS text-decoration（underline/line-through/none）
+    pub text_decoration: String,
 }
 
 /// 完整的 taffy 布局引擎（完整版）
@@ -292,6 +296,8 @@ impl TaffyLayoutEngine {
                 border_color: self.determine_border_color(&merged_decls),
                 border_style: self.determine_border_style(&merged_decls),
                 box_shadow: self.determine_box_shadow(&merged_decls),
+                background_size: self.determine_background_size(&merged_decls),
+                text_decoration: self.determine_text_decoration(&merged_decls),
             };
 
             let layout_idx = self.layout_nodes.len();
@@ -1082,6 +1088,40 @@ impl TaffyLayoutEngine {
             return Some(v.to_string());
         }
         None
+    }
+
+    /// 确定 background-size
+    fn determine_background_size(&self, decls: &[Declaration]) -> String {
+        if let Some(bs) = get_declaration(decls, "background-size") {
+            let v = bs.trim().to_lowercase();
+            match v.as_str() {
+                "cover" | "contain" => return v,
+                _ => {
+                    // 尝试解析为 px 值
+                    if let Some(_px) = parse_length(&v) {
+                        return format!("{}px", _px);
+                    }
+                }
+            }
+        }
+        "auto".to_string()
+    }
+
+    /// 确定 text-decoration
+    fn determine_text_decoration(&self, decls: &[Declaration]) -> String {
+        if let Some(td) = get_declaration(decls, "text-decoration") {
+            let v = td.trim().to_lowercase();
+            if v.contains("underline") {
+                return "underline".to_string();
+            }
+            if v.contains("line-through") {
+                return "line-through".to_string();
+            }
+            if v.contains("overline") {
+                return "overline".to_string();
+            }
+        }
+        "none".to_string()
     }
 
     /// 确定 font-family（返回备选链，按优先级排序）

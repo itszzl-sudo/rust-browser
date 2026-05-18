@@ -850,6 +850,18 @@ impl<'a> TaffyRenderer<'a> {
                                 font_color,
                                 layout.font_weight,
                             );
+
+                            // 渲染 text-decoration
+                            self.render_text_decoration(
+                                &text_content,
+                                x,
+                                y,
+                                w,
+                                h,
+                                font_size,
+                                font_color,
+                                &layout.text_decoration,
+                            );
                         }
                     }
                 }
@@ -1282,30 +1294,23 @@ impl<'a> TaffyRenderer<'a> {
         cache.get(url)
     }
 
-    /// 渲染背景图片（支持 sprite 裁剪）
+    /// 渲染背景图片（支持 background-size、sprite 裁剪）
     fn render_background_image(&mut self, _tag: &str, x: f32, y: f32, w: f32, h: f32) {
-        // 查找当前渲染树节点对应的布局
-        // 实际上在 render_tree_with_taffy 中已经通过 find_dom_index 获取了 layout
-        // 但为了简化，我们遍历所有布局节点查找匹配的元素
-
-        // 通过 tag 查找所有布局节点
         let nodes = self.taffy.find_by_tag(_tag);
         for layout in nodes {
             if let Some(bg_image) = &layout.background_image {
                 let cache = global_image_cache();
-
-                // 如果有 background-position，使用 crop_sprite 裁剪
                 let bg_x = layout.bg_position_x as i32;
                 let bg_y = layout.bg_position_y as i32;
 
+                // sprite 裁剪（background-position）
                 if bg_x != 0 || bg_y != 0 {
-                    // 使用 sprite 裁剪
                     if let Some(cropped) =
                         ImageCache::crop_sprite(bg_image, bg_x, bg_y, w as u32, h as u32)
                     {
                         self.painter.pixmap_mut().draw_pixmap(
-                            (x) as i32,
-                            (y) as i32,
+                            x as i32,
+                            y as i32,
                             cropped.as_ref(),
                             &tiny_skia::PixmapPaint::default(),
                             tiny_skia::Transform::identity(),
@@ -1315,42 +1320,108 @@ impl<'a> TaffyRenderer<'a> {
                     }
                 }
 
-                // 无偏移或裁剪失败时，直接加载完整图片
                 if let Some(pixmap) = cache.get(bg_image) {
-                    // 缩放图片适配元素区域
                     let img_w = pixmap.width() as f32;
                     let img_h = pixmap.height() as f32;
-                    let scale_x = w / img_w;
-                    let scale_y = h / img_h;
-                    let scale = scale_x.min(scale_y).min(1.0); // 只缩小不放大
 
-                    if scale < 1.0 {
-                        // 缩放到元素区域 - 使用 draw_pixmap 的缩放变换
-                        let transform =
-                            tiny_skia::Transform::from_scale(scale, scale).post_translate(x, y);
-                        self.painter.pixmap_mut().draw_pixmap(
-                            x as i32,
-                            y as i32,
-                            pixmap.as_ref(),
-                            &tiny_skia::PixmapPaint::default(),
-                            transform,
-                            None,
-                        );
-                    } else {
-                        // 居中绘制
-                        let draw_x = x + (w - img_w) / 2.0;
-                        let draw_y = y + (h - img_h) / 2.0;
-                        self.painter.pixmap_mut().draw_pixmap(
-                            draw_x as i32,
-                            draw_y as i32,
-                            pixmap.as_ref(),
-                            &tiny_skia::PixmapPaint::default(),
-                            tiny_skia::Transform::identity(),
-                            None,
-                        );
+                    // 根据 background-size 决定缩放方式
+                    match layout.background_size.as_str() {
+                        "cover" => {
+                            let scale = (w / img_w).max(h / img_h);
+                            let scaled_w = img_w * scale;
+                            let scaled_h = img_h * scale;
+                            let ox = (w - scaled_w) / 2.0;
+                            let oy = (h - scaled_h) / 2.0;
+                            let transform = tiny_skia::Transform::from_scale(scale, scale)
+                                .post_translate(x + ox, y + oy);
+                            self.painter.pixmap_mut().draw_pixmap(
+                                (x + ox) as i32,
+                                (y + oy) as i32,
+                                pixmap.as_ref(),
+                                &tiny_skia::PixmapPaint::default(),
+                                transform,
+                                None,
+                            );
+                        }
+                        "contain" => {
+                            let scale = (w / img_w).min(h / img_h);
+                            let scaled_w = img_w * scale;
+                            let scaled_h = img_h * scale;
+                            let ox = (w - scaled_w) / 2.0;
+                            let oy = (h - scaled_h) / 2.0;
+                            let transform = tiny_skia::Transform::from_scale(scale, scale)
+                                .post_translate(x + ox, y + oy);
+                            self.painter.pixmap_mut().draw_pixmap(
+                                (x + ox) as i32,
+                                (y + oy) as i32,
+                                pixmap.as_ref(),
+                                &tiny_skia::PixmapPaint::default(),
+                                transform,
+                                None,
+                            );
+                        }
+                        _ => {
+                            // auto：等比缩放，只缩小不放大
+                            let scale = (w / img_w).min(h / img_h).min(1.0);
+                            if scale < 1.0 {
+                                let transform = tiny_skia::Transform::from_scale(scale, scale)
+                                    .post_translate(x, y);
+                                self.painter.pixmap_mut().draw_pixmap(
+                                    x as i32,
+                                    y as i32,
+                                    pixmap.as_ref(),
+                                    &tiny_skia::PixmapPaint::default(),
+                                    transform,
+                                    None,
+                                );
+                            } else {
+                                let draw_x = x + (w - img_w) / 2.0;
+                                let draw_y = y + (h - img_h) / 2.0;
+                                self.painter.pixmap_mut().draw_pixmap(
+                                    draw_x as i32,
+                                    draw_y as i32,
+                                    pixmap.as_ref(),
+                                    &tiny_skia::PixmapPaint::default(),
+                                    tiny_skia::Transform::identity(),
+                                    None,
+                                );
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// 渲染 text-decoration（下划线/删除线）
+    fn render_text_decoration(
+        &mut self,
+        _text: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        _h: f32,
+        font_size: f32,
+        color: &Color,
+        decoration: &str,
+    ) {
+        let padding = 10.0;
+        let text_x = x + padding;
+        let text_y = y + padding;
+        let max_width = (w - padding * 2.0).max(0.0);
+        let line_y = text_y + font_size * 0.15; // 下划线位置（略高于基线）
+        let strike_y = text_y + font_size * 0.45; // 删除线位置（中间）
+
+        match decoration {
+            "underline" => {
+                self.painter
+                    .draw_rect(text_x, line_y, max_width, 1.0, color);
+            }
+            "line-through" => {
+                self.painter
+                    .draw_rect(text_x, strike_y, max_width, 1.0, color);
+            }
+            _ => {}
         }
     }
 
