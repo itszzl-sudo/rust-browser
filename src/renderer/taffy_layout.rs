@@ -1063,9 +1063,15 @@ impl TaffyLayoutEngine {
     }
 
     /// 确定 border-radius
+    /// 支持 px 值和百分比（百分比返回负值，渲染时根据宽高计算）
     fn determine_border_radius(&self, decls: &[Declaration]) -> f32 {
         if let Some(br) = get_declaration(decls, "border-radius") {
-            if let Some(px) = parse_length(&br) {
+            let br = br.trim();
+            // 百分比值（如 50%）- 返回负值，渲染时按 min(w,h)/2 处理
+            if br.ends_with('%') {
+                return -1.0; // 标记为百分比
+            }
+            if let Some(px) = parse_length(br) {
                 return px;
             }
         }
