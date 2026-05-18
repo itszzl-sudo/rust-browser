@@ -523,21 +523,36 @@ bridge.handle_click(100.0, 200.0);
 | `position: fixed/sticky` | taffy 0.10 `Position` 枚举缺少对应变体 | 固定/粘性定位不可用 |
 | `gap` 在 grid 布局中 | taffy 0.10 grid gap 支持不完整 | Grid 间距可能异常 |
 
-### 渲染层缺失（布局层已就绪，渲染器未实现）
+### 已支持但可能不完整的布局能力
 
-| 缺失能力 | 说明 |
-|---------|------|
-| `text-decoration` | 下划线/删除线等文本装饰 |
-| `text-transform` | 大小写转换 |
-| `letter-spacing` / `word-spacing` | 字间距/词间距 |
-| `border-color` / `border-style` | 边框颜色和样式独立控制 |
-| `border-radius` | 已在 painter 层支持，但未从 CSS 解析 |
-| `box-shadow` | 已在 painter 层支持，但仅从 style 标签解析 |
-| `background-size` / `background-repeat` | 背景图片尺寸和重复模式 |
-| `outline` | 轮廓线 |
-| `list-style` | 列表标记（bullet） |
-| `opacity` | 元素透明度 |
-| `cursor` | 鼠标样式 |
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| `font-weight` | ✅ 完整 | bold/normal/100-900 → cosmic-text `Weight` |
+| `box-sizing` | ✅ 完整 | border-box / content-box |
+| `position: relative/absolute` | ✅ 完整 | 配合 `top/right/bottom/left` |
+| `align-self` | ✅ 完整 | 单子项对齐 |
+| `flex` 简写 | ✅ 完整 | `flex: N` → grow + basis:0% |
+| `gap`（flex） | ✅ 完整 | px / % |
+| `min-width/height` / `max-width/height` | ✅ 完整 | |
+| `border-width`（统一四边）| ✅ | `border-width` 和 `border` 简写中提取宽度 |
+
+### 布局引擎缺失（CSS → 布局/渲染链路不完整）
+
+| 缺失能力 | 说明 | 链路断裂点 |
+|---------|------|-----------|
+| `border-radius` | painter 已实现绘制，但 `taffy_layout` 未解析 CSS 值 | 布局层未将 radius 传递给渲染器 |
+| `border-color` / `border-style` | 仅支持 border-width，颜色和样式未独立解析 | `determine_style` 未解析 |
+| `box-shadow` | painter 已实现，但仅通过 `StyleMap` 间接传递 | 未在 `determine_style` 中直接解析 |
+| `background-size` / `background-repeat` | 背景图片已加载，但尺寸和重复模式未处理 | 图片渲染未控制缩放/平铺 |
+| `text-decoration` | 完全未实现 | 渲染器无装饰线绘制 |
+| `text-transform` | 完全未实现 | 无大小写转换 |
+| `letter-spacing` / `word-spacing` | 完全未实现 | cosmic-text `Attrs` 未设置 |
+| `outline` | 完全未实现 | 无轮廓线绘制 |
+| `list-style` | 完全未实现 | 无 bullet 渲染 |
+| `opacity` | 完全未实现 | 无透明度合成 |
+| `cursor` | 完全未实现 | 无鼠标样式变化 |
+| `white-space` | 已解析但不生效 | taffy 0.10 无对应类型 |
+| `overflow` | 已注释掉 | taffy 0.10 无对应类型 |
 
 ### 测试相关
 
@@ -586,13 +601,14 @@ storage::local_storage::tests::test_used_bytes_tracking
 
 | 工作 | 说明 | 预估 |
 |------|------|------|
-| 选区交互 | Shift+方向键扩展选区、鼠标拖拽选区、选区高亮渲染 | 1d |
-| `font-weight` | bold 字重映射到 cosmic-text Attrs | 0.3d |
-| `text-align` | center/right 对齐 | 0.3d |
-| `box-sizing` | border-box vs content-box | 0.3d |
 | `<input type="password">` | 密码圆点字符 | 0.3d |
 | `<input placeholder>` | 占位符文本 | 0.3d |
 | `<li>` 列表数字/字母 | list-style-type: decimal/alpha | 1d |
+| `border-radius` CSS 解析 | 从 CSS 提取 border-radius 传入 painter | 0.5d |
+| `border-color` / `border-style` | 边框颜色和样式独立于宽度控制 | 0.5d |
+| `box-shadow` CSS 解析 | 在 `determine_style` 中直接解析 box-shadow | 0.3d |
+| `background-size` / `background-repeat` | 控制背景图片缩放和平铺 | 0.5d |
+| `text-decoration` | 下划线/删除线渲染 | 0.5d |
 
 ### 中期（3-10 天）
 
