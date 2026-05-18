@@ -263,6 +263,17 @@ pub trait WebNativeBridge {
         body: &[u8],
         content_type: &str,
     ) -> Result<crate::network::HttpResponse, String>;
+
+    // ── 文件操作 ──
+
+    /// 下载文件并保存到本地
+    fn download_file(&mut self, url: &str, path: &str) -> Result<u64, String>;
+
+    /// 写入文件
+    fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), String>;
+
+    /// 读取文件
+    fn read_file(&mut self, path: &str) -> Result<Vec<u8>, String>;
 }
 
 // =========================================================================

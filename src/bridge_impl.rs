@@ -361,6 +361,31 @@ impl WebNativeBridge for DefaultWebNativeBridge {
         client.post(url, body, content_type)
             .map_err(|e| format!("HTTP POST error: {}", e))
     }
+
+    // ── 文件操作 ──
+
+    fn download_file(&mut self, url: &str, path: &str) -> Result<u64, String> {
+        use crate::network::NetworkClient;
+
+        let client = NetworkClient::new();
+        let response = client.get(url)
+            .map_err(|e| format!("Download error: {}", e))?;
+
+        std::fs::write(path, &response.body)
+            .map_err(|e| format!("Write file error: {}", e))?;
+
+        Ok(response.body.len() as u64)
+    }
+
+    fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+        std::fs::write(path, data)
+            .map_err(|e| format!("Write file error: {}", e))
+    }
+
+    fn read_file(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        std::fs::read(path)
+            .map_err(|e| format!("Read file error: {}", e))
+    }
 }
 
 impl DefaultWebNativeBridge {
