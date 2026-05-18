@@ -247,8 +247,22 @@ impl Renderer {
         taffy.set_style_map(style_map);
 
         // 4. 计算布局
-        if let Err(e) = taffy.compute(dom) {
+        let layout_result = taffy.compute(dom);
+        if let Err(e) = &layout_result {
             warn!("Taffy 布局计算失败: {}, 使用手动布局回退", e);
+        }
+        
+        // 调试日志：检查布局结果
+        debug!("布局结果: nodes={}, is_empty={}", taffy.len(), taffy.is_empty());
+        
+        // 如果布局为空但文档不是空的，尝试使用 fallback
+        if taffy.is_empty() {
+            // 检查 DOM 中有多少个元素
+            let elements = dom.traverse_elements();
+            debug!("DOM 元素数量: {}", elements.len());
+            
+            // 仍然尝试渲染，至少显示 loading 页面内容
+            // 使用 render_simple 作为 fallback
         }
 
         // 4.1 计算页面总高度（超长截图）
@@ -366,6 +380,71 @@ impl Renderer {
 
     fn render_blank_page(&mut self) -> Result<(), RenderError> {
         debug!("渲染空白页面");
+
+        // 绘制浅灰色背景
+        self.painter.set_background(Color::from_hex("#F5F5F5"));
+        self.painter.paint();
+
+        // 获取视口尺寸
+        let (width, height) = self.context.viewport();
+        
+        // 计算居中提示框的位置
+        let box_w = 320.0_f32.min(width as f32 * 0.8);
+        let box_h = 160.0_f32.min(height as f32 * 0.5);
+        let box_x = (width as f32 - box_w) / 2.0;
+        let box_y = (height as f32 - box_h) / 2.0;
+
+        // 白色背景的提示框
+        self.painter.draw_rounded_rect(box_x, box_y, box_w, box_h, 8.0, &Color::WHITE);
+        self.painter.draw_rounded_border(box_x, box_y, box_w, box_h, 8.0, 1.0, &Color::from_hex("#CCCCCC"));
+        
+        // 橙色警告图标（感叹号形状）
+        let icon_center_x = box_x + box_w / 2.0;
+        let icon_y = box_y + 25.0;
+        self.painter.draw_rect(icon_center_x - 2.0, icon_y, 4.0, 18.0, &Color::from_hex("#FF9800"));
+        self.painter.draw_rect(icon_center_x - 3.0, icon_y + 22.0, 6.0, 6.0, &Color::from_hex("#FF9800"));
+
+        // 创建临时的 TaffyRenderer 用于绘制文字
+        let mut dummy_taffy = TaffyLayoutEngine::new(width as f32, height as f32);
+        let dummy_dom = DomWrapper::from_html("<html><body></body></html>", None);
+        
+        let mut text_renderer = TaffyRenderer {
+            painter: &mut self.painter,
+            taffy: &mut dummy_taffy,
+            dom: &dummy_dom,
+            node_index_cache: std::collections::HashMap::new(),
+        };
+
+        // 绘制标题文字
+        text_renderer.render_text_at(
+            "页面加载失败",
+            box_x + 40.0,
+            box_y + 65.0,
+            box_w - 80.0,
+            20.0,
+            &Color::from_hex("#333333"),
+        );
+
+        // 绘制错误信息
+        text_renderer.render_text_at(
+            "网络连接失败",
+            box_x + 40.0,
+            box_y + 95.0,
+            box_w - 80.0,
+            16.0,
+            &Color::from_hex("#666666"),
+        );
+
+        // 绘制建议
+        text_renderer.render_text_at(
+            "请检查网络连接后重试",
+            box_x + 40.0,
+            box_y + 120.0,
+            box_w - 80.0,
+            14.0,
+            &Color::from_hex("#999999"),
+        );
+
         Ok(())
     }
 

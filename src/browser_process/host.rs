@@ -656,10 +656,41 @@ fn load_document(url: &str) -> Result<Document, String> {
         }
     } else {
         // 网络请求（同步，使用 reqwest blocking client）
-        let (html, final_url) = crate::network::NetworkClient::new()
-            .fetch_html_blocking(url)
-            .map_err(|e| format!("网络请求失败: {}", e))?;
-        Ok(Document::from_html(&html, &final_url))
+        info!("开始网络请求: {}", url);
+        
+        let client = crate::network::NetworkClient::new();
+        let result = client.fetch_html_blocking(url);
+        
+        match result {
+            Ok((html, final_url)) => {
+                info!("网络请求成功，HTML 长度: {} 字符", html.len());
+                Ok(Document::from_html(&html, &final_url))
+            }
+            Err(e) => {
+                // 提供更详细的错误信息
+                let error_detail = match &e {
+                    crate::network::NetworkError::RequestFailed(msg) => {
+                        // 区分不同类型的网络错误
+                        if msg.contains("Connection refused") {
+                            "无法连接到服务器，请检查网络连接".to_string()
+                        } else if msg.contains("timed out") {
+                            "连接超时，请检查网络后重试".to_string()
+                        } else if msg.contains("DNS") {
+                            "DNS 解析失败，请检查网络设置".to_string()
+                        } else {
+                            format!("网络错误: {}", msg)
+                        }
+                    }
+                    crate::network::NetworkError::HttpStatus(code) => {
+                        format!("HTTP 错误: 状态码 {}", code)
+                    }
+                    _ => format!("网络请求失败: {}", e),
+                };
+                
+                warn!("{}", error_detail);
+                Err(error_detail)
+            }
+        }
     }
 }
 

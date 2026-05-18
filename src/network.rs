@@ -475,6 +475,7 @@ impl NetworkClient {
         content_type: Option<&str>,
         is_navigation: bool,
     ) -> Result<reqwest::blocking::Response, NetworkError> {
+        // 构建 reqwest 客户端
         let client = reqwest::blocking::Client::builder()
             .user_agent(
                 self.custom_ua
@@ -485,6 +486,21 @@ impl NetworkClient {
             .danger_accept_invalid_certs(false)
             .gzip(true)
             .brotli(true)
+            // 使用环境变量中的代理设置（HTTP_PROXY, HTTPS_PROXY, NO_PROXY）
+            .proxy(reqwest::Proxy::custom(|url| {
+                // 检查环境变量中的代理设置
+                if let Some(http_proxy) = std::env::var_os("HTTP_PROXY") {
+                    if url.scheme() == "http" {
+                        return Some(http_proxy.to_string_lossy().into_owned());
+                    }
+                }
+                if let Some(https_proxy) = std::env::var_os("HTTPS_PROXY") {
+                    if url.scheme() == "https" {
+                        return Some(https_proxy.to_string_lossy().into_owned());
+                    }
+                }
+                None
+            }))
             .build()
             .map_err(|e| NetworkError::ClientCreationFailed(e.to_string()))?;
 
@@ -564,6 +580,19 @@ impl NetworkClient {
             .timeout(Duration::from_secs(self.timeout_secs))
             .gzip(true)
             .brotli(true)
+            .proxy(reqwest::Proxy::custom(|url| {
+                if let Some(http_proxy) = std::env::var_os("HTTP_PROXY") {
+                    if url.scheme() == "http" {
+                        return Some(http_proxy.to_string_lossy().into_owned());
+                    }
+                }
+                if let Some(https_proxy) = std::env::var_os("HTTPS_PROXY") {
+                    if url.scheme() == "https" {
+                        return Some(https_proxy.to_string_lossy().into_owned());
+                    }
+                }
+                None
+            }))
             .build()
             .map_err(|e| NetworkError::ClientCreationFailed(e.to_string()))?;
 
