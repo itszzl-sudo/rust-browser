@@ -9,7 +9,7 @@ use crate::renderer::border::draw_box_shadow;
 use crate::renderer::context::RenderContext;
 use crate::renderer::image_cache::ImageCache;
 use crate::renderer::painter::Painter;
-use crate::renderer::taffy_layout::TaffyLayoutEngine;
+use crate::renderer::taffy_layout::{TaffyLayoutEngine, TaffyLayoutNode};
 use crate::renderer::text::TextRenderer;
 use crate::DomWrapper;
 use cosmic_text::{Align, Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Wrap};
@@ -792,19 +792,40 @@ impl<'a> TaffyRenderer<'a> {
                         }
                     }
 
-                    // 渲染 box-shadow
-                    self.render_box_shadow_for_element(&tag_name, x, y, w, h);
+                    // 渲染 box-shadow（优先使用 layout 中的值，fallback 到 StyleMap）
+                    if let Some(shadow) = &layout.box_shadow {
+                        self.render_box_shadow_from_str(shadow, x, y, w, h);
+                    } else {
+                        self.render_box_shadow_for_element(&tag_name, x, y, w, h);
+                    }
 
                     // 渲染背景图片
                     self.render_background_image(&tag_name, x, y, w, h);
 
-                    // 渲染元素装饰（边框等）+ 传入 node_ref 用于 img src
+                    // 渲染元素边框（从 layout 获取 border_color）
+                    if let Some(bc) = &layout.border_color {
+                        let bw = self.get_border_width(&tag_name, &layout);
+                        if bw > 0.0 {
+                            let br = layout.border_radius;
+                            if br > 0.0 {
+                                self.painter.draw_rounded_border(x, y, w, h, br, bw, bc);
+                            } else {
+                                self.painter.draw_rect_border(x, y, w, h, bw, bc);
+                            }
+                        }
+                    }
+
+                    // 渲染元素装饰（标签特定渲染）+ 传入 node_ref 用于 img src
                     self.render_element_box(&tag_name, x, y, w, h, Some(node_ref));
 
                     // 如果是 hover 节点，绘制高亮边框
                     if is_hovered {
-                        self.painter
-                            .draw_rect_border(x, y, w, h, 2.0, &Color::from_hex("#4A90D9"));
+                        let highlight = layout
+                            .border_color
+                            .as_ref()
+                            .unwrap_or(&Color::from_hex("#4A90D9"))
+                            .clone();
+                        self.painter.draw_rect_border(x, y, w, h, 2.0, &highlight);
                     }
 
                     // 渲染图片元素
@@ -1172,6 +1193,37 @@ impl<'a> TaffyRenderer<'a> {
     }
 
     /// 渲染元素的 box-shadow
+    /// 从 layout 获取边框宽度
+    fn get_border_width(&self, tag: &str, layout: &TaffyLayoutNode) -> f32 {
+        // 检查 layout 关联的 taffy style 中的 border
+        // 目前 taffy_layout 中把 border 存到了 taffy style 中
+        // 这里通过 tag 标签取默认边框宽度
+        match tag {
+            "input" | "textarea" | "select" => 1.0,
+            "button" => 1.0,
+            "img" => 0.0,
+            _ => 0.0,
+        }
+    }
+
+    /// 直接解析 box-shadow 字符串并渲染
+    fn render_box_shadow_from_str(&mut self, shadow_str: &str, x: f32, y: f32, w: f32, h: f32) {
+        if let Some(shadow) = parse_box_shadow_from_style(shadow_str) {
+            draw_box_shadow(
+                self.painter.pixmap_mut(),
+                x,
+                y,
+                w,
+                h,
+                shadow.offset_x,
+                shadow.offset_y,
+                shadow.blur_radius,
+                shadow.spread,
+                &shadow.color,
+            );
+        }
+    }
+
     fn render_box_shadow_for_element(&mut self, tag: &str, x: f32, y: f32, w: f32, h: f32) {
         // 只对块级元素渲染 box-shadow
         if let Some(shadow) = self.find_box_shadow_for_tag(tag) {

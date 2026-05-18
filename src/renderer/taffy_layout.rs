@@ -87,6 +87,12 @@ pub struct TaffyLayoutNode {
     pub font_weight: u16,
     /// CSS border-radius（像素，0=无圆角）
     pub border_radius: f32,
+    /// CSS border-color
+    pub border_color: Option<Color>,
+    /// CSS border-style（solid/dashed/dotted/none）
+    pub border_style: String,
+    /// CSS box-shadow 原始值
+    pub box_shadow: Option<String>,
 }
 
 /// 完整的 taffy 布局引擎（完整版）
@@ -283,6 +289,9 @@ impl TaffyLayoutEngine {
                 line_height: self.determine_line_height(&merged_decls),
                 font_weight: self.determine_font_weight(&merged_decls),
                 border_radius: self.determine_border_radius(&merged_decls),
+                border_color: self.determine_border_color(&merged_decls),
+                border_style: self.determine_border_style(&merged_decls),
+                box_shadow: self.determine_box_shadow(&merged_decls),
             };
 
             let layout_idx = self.layout_nodes.len();
@@ -1013,8 +1022,66 @@ impl TaffyLayoutEngine {
                 return px;
             }
         }
-        // 从 border 简写中提取（通常不包含 radius，但有些写法如 "border: 1px solid #ddd; border-radius: 8px"）
         0.0
+    }
+
+    /// 确定 border-color
+    fn determine_border_color(&self, decls: &[Declaration]) -> Option<Color> {
+        // 优先使用 border-color
+        if let Some(bc) = get_declaration(decls, "border-color") {
+            if bc.starts_with('#') {
+                return Some(Color::from_hex(&bc));
+            }
+            if let Some(named) = Color::from_name(&bc) {
+                return Some(named);
+            }
+        }
+        // 从 border 简写中提取颜色（border: 1px solid #ddd）
+        if let Some(b) = get_declaration(decls, "border") {
+            for part in b.split_whitespace() {
+                if part.starts_with('#') {
+                    return Some(Color::from_hex(part));
+                }
+                if let Some(named) = Color::from_name(part) {
+                    return Some(named);
+                }
+            }
+        }
+        None
+    }
+
+    /// 确定 border-style
+    fn determine_border_style(&self, decls: &[Declaration]) -> String {
+        if let Some(bs) = get_declaration(decls, "border-style") {
+            let lower = bs.trim().to_lowercase();
+            match lower.as_str() {
+                "solid" | "dashed" | "dotted" | "double" | "none" => return lower,
+                _ => {}
+            }
+        }
+        if let Some(b) = get_declaration(decls, "border") {
+            for part in b.split_whitespace() {
+                match part.to_lowercase().as_str() {
+                    "solid" | "dashed" | "dotted" | "double" | "none" => {
+                        return part.to_lowercase()
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "none".to_string()
+    }
+
+    /// 确定 box-shadow
+    fn determine_box_shadow(&self, decls: &[Declaration]) -> Option<String> {
+        if let Some(bs) = get_declaration(decls, "box-shadow") {
+            let v = bs.trim();
+            if v == "none" || v.is_empty() {
+                return None;
+            }
+            return Some(v.to_string());
+        }
+        None
     }
 
     /// 确定 font-family（返回备选链，按优先级排序）
