@@ -146,6 +146,9 @@ pub type EventHandler = Box<dyn FnMut(f32, f32) + Send>;
 /// 表单提交处理器：接收字段名 → 值的映射
 pub type FormHandler = Box<dyn FnMut(HashMap<String, String>) + Send>;
 
+/// window.open 处理器：接收 URL，返回是否处理
+pub type WindowOpenHandler = Box<dyn FnMut(&str) -> bool + Send>;
+
 // ---------------------------------------------------------------------------
 // Bridge Trait
 // ---------------------------------------------------------------------------
@@ -231,11 +234,17 @@ pub trait WebNativeBridge {
     /// 绑定表单提交事件
     fn on_form_submit(&mut self, selector: &str, handler: FormHandler);
 
+    /// 绑定 window.open 事件（用于附件下载）
+    fn on_window_open(&mut self, handler: WindowOpenHandler);
+
     /// 处理鼠标点击（事件冒泡）
     fn handle_click(&mut self, x: f32, y: f32) -> bool;
 
     /// 处理表单提交
     fn handle_form_submit(&mut self, form_selector: &str);
+
+    /// 处理 window.open 调用（返回是否已处理）
+    fn handle_window_open(&mut self, url: &str) -> bool;
 
     // ── 工具 ──
 
@@ -546,6 +555,18 @@ mod tests {
             _content_type: &str,
         ) -> Result<crate::network::HttpResponse, String> {
             Err("Mock: no network".to_string())
+        }
+
+        fn download_file(&mut self, _url: &str, _path: &str) -> Result<u64, String> {
+            Err("Mock: no network".to_string())
+        }
+
+        fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), String> {
+            Err("Mock: no write".to_string())
+        }
+
+        fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, String> {
+            Err("Mock: no read".to_string())
         }
     }
 

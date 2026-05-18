@@ -42,6 +42,11 @@ pub struct DefaultWebNativeBridge {
     click_handlers: HashMap<String, EventHandler>,
     /// 表单提交：CSS 选择器 → 处理器
     form_handlers: HashMap<String, FormHandler>,
+    /// window.open 处理器
+    window_open_handler: Option<WindowOpenHandler>,
+
+    /// 网络客户端
+    network_client: crate::network::NetworkClient,
 
     #[cfg(any(feature = "js", feature = "boa"))]
     js_engine: JsEngine,
@@ -84,8 +89,10 @@ impl WebNativeBridge for DefaultWebNativeBridge {
             html: String::new(),
             url: "about:blank".to_string(),
             inline_styles: String::new(),
+            network_client: crate::network::NetworkClient::new(),
             click_handlers: HashMap::new(),
             form_handlers: HashMap::new(),
+            window_open_handler: None,
             #[cfg(any(feature = "js", feature = "boa"))]
             js_engine: JsEngine::new(),
         }
@@ -311,6 +318,18 @@ impl WebNativeBridge for DefaultWebNativeBridge {
         }
     }
 
+    fn on_window_open(&mut self, handler: WindowOpenHandler) {
+        self.window_open_handler = Some(handler);
+    }
+
+    fn handle_window_open(&mut self, url: &str) -> bool {
+        if let Some(handler) = &mut self.window_open_handler {
+            handler(url)
+        } else {
+            false
+        }
+    }
+
     // ── 工具 ──
 
     fn set_viewport(&mut self, width: u32, height: u32) {
@@ -327,19 +346,18 @@ impl WebNativeBridge for DefaultWebNativeBridge {
     // ── 网络请求 ──
 
     fn navigate(&mut self, url: &str) -> Result<(), String> {
-        use crate::network::NetworkClient;
-        
-        let client = NetworkClient::new();
-        let response = client.get(url)
+        let response = self
+            .network_client
+            .navigate_blocking(url)
             .map_err(|e| format!("Network error: {}", e))?;
-        
-        // 更新 URL
+
+        // 更新 URL（使用 final_url 处理重定向）
         self.url = response.final_url.clone();
-        
+
         // 解析 HTML
         let html = String::from_utf8_lossy(&response.body).to_string();
         self.set_html(&html);
-        
+
         Ok(())
     }
 
@@ -348,17 +366,19 @@ impl WebNativeBridge for DefaultWebNativeBridge {
     }
 
     fn http_get(&mut self, url: &str) -> Result<crate::network::HttpResponse, String> {
-        use crate::network::NetworkClient;
-        
-        let client = NetworkClient::new();
-        client.get(url).map_err(|e| format!("HTTP GET error: {}", e))
+        self.network_client
+            .get(url)
+            .map_err(|e| format!("HTTP GET error: {}", e))
     }
 
-    fn http_post(&mut self, url: &str, body: &[u8], content_type: &str) -> Result<crate::network::HttpResponse, String> {
-        use crate::network::NetworkClient;
-        
-        let client = NetworkClient::new();
-        client.post(url, body, content_type)
+    fn http_post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        content_type: &str,
+    ) -> Result<crate::network::HttpResponse, String> {
+        self.network_client
+            .post(url, body, content_type)
             .map_err(|e| format!("HTTP POST error: {}", e))
     }
 
@@ -368,23 +388,21 @@ impl WebNativeBridge for DefaultWebNativeBridge {
         use crate::network::NetworkClient;
 
         let client = NetworkClient::new();
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .map_err(|e| format!("Download error: {}", e))?;
 
-        std::fs::write(path, &response.body)
-            .map_err(|e| format!("Write file error: {}", e))?;
+        std::fs::write(path, &response.body).map_err(|e| format!("Write file error: {}", e))?;
 
         Ok(response.body.len() as u64)
     }
 
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
-        std::fs::write(path, data)
-            .map_err(|e| format!("Write file error: {}", e))
+        std::fs::write(path, data).map_err(|e| format!("Write file error: {}", e))
     }
 
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        std::fs::read(path)
-            .map_err(|e| format!("Read file error: {}", e))
+        std::fs::read(path).map_err(|e| format!("Read file error: {}", e))
     }
 }
 
