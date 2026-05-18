@@ -846,7 +846,7 @@ impl<'a> TaffyRenderer<'a> {
             .position(|n| Rc::as_ptr(&n.0) as usize == rc_ptr)
     }
 
-    /// 渲染元素装饰（边框、背景装饰等）
+    /// 精美渲染元素装饰（背景、边框、装饰线等）
     fn render_element_box(
         &mut self,
         tag: &str,
@@ -858,18 +858,69 @@ impl<'a> TaffyRenderer<'a> {
     ) {
         match tag {
             "hr" => {
+                // 精美分割线
+                let mid_y = y + h / 2.0;
+                // 主线条
                 self.painter
-                    .draw_rect(x, y, w, 1.0, &Color::from_hex("#dddddd"));
+                    .draw_rect(x + 8.0, mid_y, w - 16.0, 1.0, &Color::from_hex("#DDDDDD"));
+            }
+            "blockquote" => {
+                // 引用左侧色条 + 浅灰背景
+                self.painter
+                    .draw_rounded_rect(x, y, w, h, 4.0, &Color::from_hex("#F9F9F9"));
+                self.painter
+                    .draw_rounded_rect(x, y, 4.0, h, 2.0, &Color::from_hex("#4A90D9"));
+            }
+            "button" => {
+                // 圆角按钮
+                let is_focused = self.is_node_focused(node_ref);
+                let bg = if is_focused {
+                    Color::from_hex("#3A7BD5")
+                } else {
+                    Color::from_hex("#4A90D9")
+                };
+                self.painter.draw_rounded_rect(x, y, w, h, 6.0, &bg);
+                // 顶部高光
+                self.painter
+                    .draw_rounded_rect(x, y, w, h * 0.5, 6.0, &Color::from_hex("#5BA0E9"));
+            }
+            "a" => {
+                // 链接无特殊装饰，由 text 渲染处理下划线
             }
             "img" => {
-                // 图片占位符背景 - 仅在未加载成功时显示
-                self.render_img_placeholder(x, y, w, h);
+                // 图片：已在 render_img_element 中处理，占位符只在无 src 时显示
             }
             "input" => {
                 self.render_input_element(x, y, w, h, node_ref);
             }
             "textarea" => {
                 self.render_textarea_element(x, y, w, h, node_ref);
+            }
+            "li" => {
+                // 列表圆点
+                let dot_size = 6.0;
+                let dot_x = x + 8.0;
+                let dot_y = y + h / 2.0;
+                // 使用小矩形模拟圆点
+                self.painter.draw_rounded_rect(
+                    dot_x - dot_size / 2.0,
+                    dot_y - dot_size / 2.0,
+                    dot_size,
+                    dot_size,
+                    dot_size / 2.0,
+                    &Color::from_hex("#666666"),
+                );
+            }
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                // 标题左侧装饰条
+                self.painter.draw_rounded_rect(
+                    x + 4.0,
+                    y + 4.0,
+                    4.0,
+                    (h - 8.0).max(8.0),
+                    2.0,
+                    &Color::from_hex("#4A90D9"),
+                );
             }
             _ => {}
         }
@@ -915,13 +966,41 @@ impl<'a> TaffyRenderer<'a> {
             .draw_rect(center_x, center_y, 40.0, 20.0, &Color::from_hex("#cccccc"));
     }
 
-    /// 渲染 <input> 元素（单行文本输入框）
+    /// 精美渲染 <input> 元素（单行文本输入框）
     fn render_input_element(&mut self, x: f32, y: f32, w: f32, h: f32, node_ref: Option<&NodeRef>) {
-        // 白色背景
-        self.painter.draw_rect(x, y, w, h, &Color::WHITE);
-        // 灰色 1px 边框
-        self.painter
-            .draw_rect_border(x, y, w, h, 1.0, &Color::from_hex("#888888"));
+        let is_focused = self.is_node_focused(node_ref);
+        let bg_color = Color::from_hex("#FFFFFF");
+        let border_color = if is_focused {
+            Color::from_hex("#4A90D9") // 聚焦时蓝色边框
+        } else {
+            Color::from_hex("#CCCCCC") // 默认灰色边框
+        };
+
+        // 白色圆角背景
+        self.painter.draw_rounded_rect(x, y, w, h, 4.0, &bg_color);
+        // 圆角边框
+        self.painter.draw_rounded_border(
+            x,
+            y,
+            w,
+            h,
+            4.0,
+            if is_focused { 2.0 } else { 1.0 },
+            &border_color,
+        );
+
+        // 内部阴影效果（浅灰内边线）
+        if !is_focused {
+            self.painter.draw_rounded_border(
+                x + 0.5,
+                y + 0.5,
+                w - 1.0,
+                h - 1.0,
+                3.5,
+                0.5,
+                &Color::from_hex("#EEEEEE"),
+            );
+        }
 
         // 读取 value 属性
         let value = node_ref
@@ -931,8 +1010,8 @@ impl<'a> TaffyRenderer<'a> {
             })
             .unwrap_or_default();
 
-        let font_size = 14.0;
-        let padding = 4.0;
+        let font_size = (h * 0.55).max(12.0).min(16.0);
+        let padding = 8.0;
         let text_color = &Color::from_hex("#333333");
 
         // 渲染文本（左对齐，垂直居中）
@@ -944,14 +1023,12 @@ impl<'a> TaffyRenderer<'a> {
             self.render_text_at(&value, text_x, text_y, max_width, font_size, text_color);
         }
 
-        // 判断是否有焦点
-        let is_focused = self.is_node_focused(node_ref);
-
+        // 聚焦时绘制光标
         if is_focused {
-            // 在文本末尾绘制竖线光标（始终可见，简化版本）
-            let cursor_x = text_x + value.len() as f32 * (font_size * 0.6).min(8.0);
+            let text_width = value.len() as f32 * (font_size * 0.6).max(6.0);
+            let cx = (text_x + text_width).min(x + w - padding);
             self.painter
-                .draw_rect(cursor_x, y + 2.0, 2.0, h - 4.0, &Color::from_hex("#333333"));
+                .draw_rect(cx, y + 4.0, 1.5, h - 8.0, &Color::from_hex("#333333"));
         }
     }
 
@@ -976,7 +1053,7 @@ impl<'a> TaffyRenderer<'a> {
             .is_some()
     }
 
-    /// 渲染 <textarea> 元素（多行文本输入框）
+    /// 精美渲染 <textarea> 元素（多行文本输入框）
     fn render_textarea_element(
         &mut self,
         x: f32,
@@ -985,11 +1062,26 @@ impl<'a> TaffyRenderer<'a> {
         h: f32,
         node_ref: Option<&NodeRef>,
     ) {
-        // 白色背景
-        self.painter.draw_rect(x, y, w, h, &Color::WHITE);
-        // 灰色 1px 边框
+        let is_focused = self.is_node_focused(node_ref);
+        let border_color = if is_focused {
+            Color::from_hex("#4A90D9")
+        } else {
+            Color::from_hex("#CCCCCC")
+        };
+
+        // 白色圆角背景
         self.painter
-            .draw_rect_border(x, y, w, h, 1.0, &Color::from_hex("#888888"));
+            .draw_rounded_rect(x, y, w, h, 4.0, &Color::WHITE);
+        // 圆角边框
+        self.painter.draw_rounded_border(
+            x,
+            y,
+            w,
+            h,
+            4.0,
+            if is_focused { 2.0 } else { 1.0 },
+            &border_color,
+        );
 
         // 读取 value 属性或直接子文本
         let value = node_ref
@@ -997,16 +1089,13 @@ impl<'a> TaffyRenderer<'a> {
                 nr.as_element()
                     .and_then(|el| el.attributes.borrow().get("value").map(|s| s.to_string()))
             })
-            .unwrap_or_else(|| {
-                // 如果没有 value 属性，使用 text_content_recursive
-                node_ref.map(|nr| collect_text(&nr)).unwrap_or_default()
-            });
+            .unwrap_or_else(|| node_ref.map(|nr| collect_text(&nr)).unwrap_or_default());
 
         let font_size = 14.0;
-        let padding = 4.0;
+        let padding = 8.0;
         let text_color = &Color::from_hex("#333333");
 
-        // 渲染文本（左对齐，多行）
+        // 渲染文本
         let text_x = x + padding;
         let text_y = y + padding;
         let max_width = w - padding * 2.0;
@@ -1015,21 +1104,18 @@ impl<'a> TaffyRenderer<'a> {
             self.render_text_at(&value, text_x, text_y, max_width, font_size, text_color);
         }
 
-        // 判断焦点状态并渲染光标
-        let is_focused = self.is_node_focused(node_ref);
-
+        // 聚焦时绘制光标
         if is_focused {
-            // 简单光标：在文本末尾
-            let line_height = font_size * 1.375;
-            let num_lines = value.lines().count().max(1);
-            let cursor_x_val = text_x
-                + (value.lines().last().unwrap_or("").len() as f32) * (font_size * 0.6).min(8.0);
-            let cursor_y = text_y + (num_lines - 1) as f32 * line_height;
+            let line_height = font_size * 1.4;
+            let lines: Vec<&str> = value.lines().collect();
+            let last_line = lines.last().unwrap_or(&"");
+            let cursor_x_val = text_x + (last_line.len() as f32) * (font_size * 0.6).max(6.0);
+            let cursor_y = text_y + (lines.len().max(1) - 1) as f32 * line_height;
             self.painter.draw_rect(
                 cursor_x_val,
                 cursor_y,
-                2.0,
-                font_size * 1.2,
+                1.5,
+                font_size * 1.1,
                 &Color::from_hex("#333333"),
             );
         }
