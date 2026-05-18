@@ -1486,6 +1486,6 @@ mod tests {
     fn test_global_image_cache() {
         let cache = global_image_cache();
         // 只是验证返回非空
-        assert!(cache.len() == 0 || cache.len() >= 0);
+        assert!(cache.len() == 0);
     }
 }
