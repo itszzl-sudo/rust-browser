@@ -835,6 +835,53 @@ impl TaffyLayoutEngine {
             let _ = v;
         }
 
+        // 解析 box-sizing
+        if let Some(bs) = get_declaration(decls, "box-sizing") {
+            match bs.as_str() {
+                "border-box" => style.box_sizing = BoxSizing::BorderBox,
+                "content-box" => style.box_sizing = BoxSizing::ContentBox,
+                _ => {}
+            }
+        }
+
+        // 解析 align-self（taffy 0.10 中 AlignItems 没有 Auto）
+        if let Some(als) = get_declaration(decls, "align-self") {
+            style.align_self = Some(match als.as_str() {
+                "flex-start" => AlignItems::FlexStart,
+                "flex-end" => AlignItems::FlexEnd,
+                "center" => AlignItems::Center,
+                "stretch" => AlignItems::Stretch,
+                "baseline" => AlignItems::Baseline,
+                _ => AlignItems::Stretch,
+            });
+        }
+
+        // 解析 order（taffy 0.10 中 Style 没有 order 字段，已忽略）
+        let _ = get_declaration(decls, "order");
+
+        // 解析 position
+        if let Some(pos) = get_declaration(decls, "position") {
+            match pos.as_str() {
+                "relative" => style.position = taffy::Position::Relative,
+                "absolute" => style.position = taffy::Position::Absolute,
+                _ => {}
+            }
+        }
+
+        // 解析 top/right/bottom/left（用于定位）
+        if let Some(v) = get_declaration(decls, "top") {
+            style.inset.top = to_lpa(&v);
+        }
+        if let Some(v) = get_declaration(decls, "right") {
+            style.inset.right = to_lpa(&v);
+        }
+        if let Some(v) = get_declaration(decls, "bottom") {
+            style.inset.bottom = to_lpa(&v);
+        }
+        if let Some(v) = get_declaration(decls, "left") {
+            style.inset.left = to_lpa(&v);
+        }
+
         // 解析 text-align
         if let Some(ta) = get_declaration(decls, "text-align") {
             match ta.as_str() {
