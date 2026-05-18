@@ -59,12 +59,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         <!-- 卡片一：颜色色块（不依赖flex，用table布局） -->
         <div id="card-colors" style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
             <h2 id="title-colors" style="color: #333; margin: 0 0 6px 0; font-size: 15px;">颜色色块</h2>
-            <div id="color-container">
-                <div id="red-block" style="width:50px; height:50px; background:#ff4444; border-radius:4px; display:inline-block;"></div>
-                <div id="green-block" style="width:50px; height:50px; background:#44bb44; border-radius:4px; display:inline-block; margin-left:6px;"></div>
-                <div id="blue-block" style="width:50px; height:50px; background:#4488ff; border-radius:4px; display:inline-block; margin-left:6px;"></div>
-                <div id="orange-circle" style="width:50px; height:50px; background:orange; border-radius:50%; display:inline-block; margin-left:6px;"></div>
-                <div id="purple-circle" style="width:50px; height:50px; background:purple; border-radius:50%; display:inline-block; margin-left:6px;"></div>
+            <div id="color-container" style="display: flex; gap: 6px;">
+                <div id="red-block" style="width:50px; height:50px; background:#ff4444; border-radius:4px;"></div>
+                <div id="green-block" style="width:50px; height:50px; background:#44bb44; border-radius:4px;"></div>
+                <div id="blue-block" style="width:50px; height:50px; background:#4488ff; border-radius:4px;"></div>
+                <div id="orange-circle" style="width:50px; height:50px; background:orange; border-radius:50%;"></div>
+                <div id="purple-circle" style="width:50px; height:50px; background:purple; border-radius:50%;"></div>
             </div>
         </div>
 

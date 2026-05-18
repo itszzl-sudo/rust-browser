@@ -838,15 +838,30 @@ impl<'a> TaffyRenderer<'a> {
                         let text_content = collect_text(node_ref);
                         if !text_content.trim().is_empty() {
                             let font_size = layout.font_size.max(12.0);
+                            if font_size > h && h > 0.0 {
+                                // 如果字号超出元素高度，缩小字号适配
+                                let _ = font_size;
+                            }
+                            let actual_font_size = if h > 0.0 {
+                                font_size.min(h * 0.7).max(8.0)
+                            } else {
+                                font_size
+                            };
                             let default_color = Color::from_hex("#333333");
                             let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
-                            let padding = 10.0;
+                            // 水平 padding 保持 10px，垂直居中
+                            let padding_x = 10.0;
+                            let text_y = if h > actual_font_size {
+                                y + (h - actual_font_size) / 2.0
+                            } else {
+                                y + 2.0
+                            };
                             self.render_text_at_weight(
                                 &text_content,
-                                x + padding,
-                                y + padding,
-                                w - padding * 2.0,
-                                font_size,
+                                x + padding_x,
+                                text_y,
+                                w - padding_x * 2.0,
+                                actual_font_size,
                                 font_color,
                                 layout.font_weight,
                             );
@@ -871,49 +886,8 @@ impl<'a> TaffyRenderer<'a> {
             for child in node_ref.children() {
                 self.render_tree_with_taffy(&child);
             }
-        } else if node_ref.as_text().is_some() {
-            // 文本节点：查找父元素布局来渲染文本
-            if let Some(parent) = node_ref.parent() {
-                if let Some(element) = parent.as_element() {
-                    let tag_name = element.name.local.to_string();
-                    if let Some(dom_idx) = self.find_dom_index(&parent) {
-                        if let Some(layout) = self.taffy.get_layout(dom_idx) {
-                            // 跳过 style/script/head 等不可见标签内的文本
-                            if tag_name != "img"
-                                && tag_name != "style"
-                                && tag_name != "script"
-                                && tag_name != "head"
-                            {
-                                let text_content = collect_text(&parent);
-                                if !text_content.trim().is_empty() {
-                                    // 已经在父元素渲染过了，跳过
-                                } else if let Some(text) = node_ref.as_text() {
-                                    let contents = text.borrow();
-                                    let trimmed = contents.trim();
-                                    if !trimmed.is_empty() {
-                                        let font_size = layout.font_size.max(12.0);
-                                        let default_color = Color::from_hex("#333333");
-                                        let font_color =
-                                            layout.font_color.as_ref().unwrap_or(&default_color);
-                                        let padding = 10.0;
-                                        self.render_text_at_weight(
-                                            trimmed,
-                                            layout.x + padding,
-                                            layout.y + padding,
-                                            layout.width - padding * 2.0,
-                                            font_size,
-                                            font_color,
-                                            layout.font_weight,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         } else {
-            // 文档节点等 - 直接递归子节点
+            // 文本节点、文档节点等 - 直接递归子节点
             for child in node_ref.children() {
                 self.render_tree_with_taffy(&child);
             }
