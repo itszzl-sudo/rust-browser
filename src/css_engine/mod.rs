@@ -26,6 +26,7 @@ pub struct CssRule {
 pub type StyleMap = HashMap<String, Vec<Declaration>>;
 
 /// 从 CSS 文本中手动提取规则（无需 cssparser tokenizer）
+/// 支持 @media 查询：当前只支持 screen 和 (min-width: Xpx) 条件
 pub fn parse_css_rules(css: &str) -> Vec<CssRule> {
     let mut rules = Vec::new();
     let mut pos = 0usize;
@@ -47,6 +48,17 @@ pub fn parse_css_rules(css: &str) -> Vec<CssRule> {
                 continue;
             }
             break;
+        }
+
+        // 检测 @media 块
+        if bytes[pos] == b'@' {
+            if let Some(end) = parse_media_block(css, &mut pos, bytes) {
+                // pos is updated inside; if media block condition is met, merge inner rules
+                if let Some(inner_rules) = end {
+                    rules.extend(inner_rules);
+                }
+            }
+            continue;
         }
 
         // 找到 { 的位置
@@ -87,6 +99,128 @@ pub fn parse_css_rules(css: &str) -> Vec<CssRule> {
         });
     }
     rules
+}
+
+/// 解析 @media 块
+/// 返回 Some(inner_rules) 如果条件满足，否则返回 Some(empty vec)
+/// 返回 None 表示解析失败
+fn parse_media_block(css: &str, pos: &mut usize, bytes: &[u8]) -> Option<Option<Vec<CssRule>>> {
+    // 当前 pos 在 '@' 上
+    // 提取 @media 条件部分：从 '@' 到第一个 '{'
+    let brace_start = match css[*pos..].find('{') {
+        Some(i) => *pos + i,
+        None => return None,
+    };
+
+    let media_condition = css[*pos..brace_start].trim();
+    *pos = brace_start + 1;
+
+    // 找到匹配的 }（@media 的最外层）
+    let mut depth = 1u32;
+    let mut brace_end = *pos;
+    while brace_end < bytes.len() && depth > 0 {
+        match bytes[brace_end] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        brace_end += 1;
+    }
+    if depth > 0 {
+        return None;
+    }
+
+    let block = &css[*pos..brace_end - 1];
+    *pos = brace_end;
+
+    // 解析 @media 条件
+    // 只支持 screen 和 (min-width: Xpx)
+    let condition_met = evaluate_media_condition(media_condition);
+
+    if condition_met {
+        // 条件满足，递归解析内部的规则（传给 css 字符串的 block 部分）
+        // 但 block 内部的规则是普通 CSS 规则，调用 parse_css_rules 递归
+        let inner_rules = parse_css_rules(block);
+        Some(Some(inner_rules))
+    } else {
+        // 条件不满足，跳过
+        Some(Some(Vec::new()))
+    }
+}
+
+/// 判断 @media 条件是否满足
+/// 当前只支持：
+/// - `screen`
+/// - `(min-width: Xpx)`
+/// - `screen and (min-width: Xpx)`
+fn evaluate_media_condition(condition: &str) -> bool {
+    let trimmed = condition.trim();
+    // 移除开头的 @media
+    let cond = trimmed
+        .strip_prefix("@media")
+        .or_else(|| trimmed.strip_prefix("@media"))
+        .map(|s| s.trim())
+        .unwrap_or(trimmed);
+
+    // 默认 screen 总是 true（我们支持 screen）
+    if cond.eq_ignore_ascii_case("screen") || cond.is_empty() || cond.eq_ignore_ascii_case("all") {
+        return true;
+    }
+
+    // 检查 screen and (...) 或 only screen and (...)
+    let inner = if let Some(rest) = cond
+        .strip_prefix("screen")
+        .or_else(|| cond.strip_prefix("only screen"))
+    {
+        rest.trim()
+    } else {
+        cond
+    };
+
+    // 检查 and (min-width: Xpx)
+    if let Some(rest) = inner.strip_prefix("and") {
+        let paren_part = rest.trim();
+        evaluate_parenthesized_condition(paren_part)
+    } else if inner.starts_with('(') {
+        evaluate_parenthesized_condition(inner)
+    } else {
+        // 不支持的媒体类型，返回 false
+        false
+    }
+}
+
+/// 解析括号内的条件，如 (min-width: 768px)
+fn evaluate_parenthesized_condition(cond: &str) -> bool {
+    let trimmed = cond.trim();
+    // 去掉首尾括号
+    let inner = if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    let inner = inner.trim();
+
+    // min-width: Xpx
+    if let Some(value_str) = inner.strip_prefix("min-width:") {
+        let value_str = value_str.trim();
+        if let Some(px_value) = parse_length(value_str) {
+            // 我们使用 1280 作为默认视口宽度
+            // 这里简单判断：如果 min-width <= 1280，条件成立
+            return px_value <= 1280.0;
+        }
+    }
+
+    // max-width: Xpx
+    if let Some(value_str) = inner.strip_prefix("max-width:") {
+        let value_str = value_str.trim();
+        if let Some(px_value) = parse_length(value_str) {
+            return px_value >= 1280.0;
+        }
+    }
+
+    // 其他条件暂不支持，默认返回 true 以兼容
+    true
 }
 
 /// 解析声明块 "property: value; ..."

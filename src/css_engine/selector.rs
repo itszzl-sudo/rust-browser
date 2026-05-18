@@ -616,17 +616,41 @@ pub fn rules_to_style_map_with_selectors(rules: &[CssRule], doc_ref: &NodeRef) -
     use std::collections::HashMap;
     let mut map: super::StyleMap = HashMap::new();
 
-    // 对每个 CSS 规则解析其选择器（跳过解析失败的）
-    let parsed_rules: Vec<(SelectorList<KuchikiSelectorImpl>, &[super::Declaration])> = rules
-        .iter()
-        .filter_map(|rule| {
-            parse_selector(&rule.selector)
-                .ok()
-                .map(|sel_list| (sel_list, rule.declarations.as_slice()))
-        })
-        .collect();
+    // 分离 :hover 规则和普通规则
+    let mut normal_rules: Vec<(SelectorList<KuchikiSelectorImpl>, &[super::Declaration])> =
+        Vec::new();
+    let mut hover_rules: Vec<(String, Vec<super::Declaration>)> = Vec::new();
 
-    if parsed_rules.is_empty() {
+    for rule in rules {
+        if rule.selector.contains(":hover") {
+            // 对于 :hover 规则，提取标签名
+            // 支持的格式: "div:hover", "a:hover", "button:hover"
+            if let Some(tag) = rule.selector.trim().split(':').next() {
+                if !tag.is_empty() && !tag.contains(' ') && !tag.contains('.') && !tag.contains('#')
+                {
+                    hover_rules.push((format!("{}:hover", tag), rule.declarations.clone()));
+                } else {
+                    // 复杂选择器含 :hover，也尝试解析并添加到 map
+                    if let Ok(sel_list) = parse_selector(&rule.selector) {
+                        normal_rules.push((sel_list, rule.declarations.as_slice()));
+                    }
+                }
+            }
+        } else {
+            if let Ok(sel_list) = parse_selector(&rule.selector) {
+                normal_rules.push((sel_list, rule.declarations.as_slice()));
+            }
+        }
+    }
+
+    // 将 :hover 规则直接加入 map（按 tag:hover 键）
+    for (hover_key, decls) in &hover_rules {
+        map.entry(hover_key.clone())
+            .or_default()
+            .extend(decls.iter().cloned());
+    }
+
+    if normal_rules.is_empty() && hover_rules.is_empty() {
         return map;
     }
 
@@ -641,8 +665,8 @@ pub fn rules_to_style_map_with_selectors(rules: &[CssRule], doc_ref: &NodeRef) -
             .map(|el| el.name.local.to_string())
             .unwrap_or_default();
 
-        // 对每个规则检查是否匹配
-        for (selector_list, decls) in &parsed_rules {
+        // 对每个普通规则检查是否匹配
+        for (selector_list, decls) in &normal_rules {
             if element_matches_selector_list(&node, selector_list) {
                 map.entry(tag_name.clone())
                     .or_default()

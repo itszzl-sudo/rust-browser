@@ -60,6 +60,42 @@ impl Painter {
         self.draw_rect(x, y, width, height, color);
     }
 
+    /// 绘制矩形边框（用于 hover 高亮等场景）
+    pub fn draw_rect_border(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        border_width: f32,
+        color: &Color,
+    ) {
+        let rgba = color.to_rgba();
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+
+        // 上边线
+        if let Some(rect) = Rect::from_xywh(x, y, width, border_width) {
+            self.pixmap
+                .fill_rect(rect, &paint, Transform::identity(), None);
+        }
+        // 下边线
+        if let Some(rect) = Rect::from_xywh(x, y + height - border_width, width, border_width) {
+            self.pixmap
+                .fill_rect(rect, &paint, Transform::identity(), None);
+        }
+        // 左边线
+        if let Some(rect) = Rect::from_xywh(x, y, border_width, height) {
+            self.pixmap
+                .fill_rect(rect, &paint, Transform::identity(), None);
+        }
+        // 右边线
+        if let Some(rect) = Rect::from_xywh(x + width - border_width, y, border_width, height) {
+            self.pixmap
+                .fill_rect(rect, &paint, Transform::identity(), None);
+        }
+    }
+
     pub fn layout_engine(&self) -> &LayoutEngine {
         &self.layout_engine
     }

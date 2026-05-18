@@ -358,6 +358,43 @@ impl eframe::App for BrowserApp {
             });
         });
 
+        // 加载进度条（显示在导航栏下方）
+        if self.is_loading {
+            egui::TopBottomPanel::top("loading_bar")
+                .min_height(4.0)
+                .show(ctx, |ui| {
+                    ui.set_min_height(4.0);
+                    let available_width = ui.available_width();
+                    let time = ctx.input(|i| i.time);
+                    // 制作一个从蓝到白的渐变动画条
+                    let progress = ((time * 2.0).sin() * 0.5 + 0.5) as f32; // 0~1 呼吸
+
+                    // 绘制进度条背景
+                    let painter = ui.painter();
+                    let bar_rect = egui::Rect::from_min_size(
+                        egui::pos2(0.0, ui.cursor().min.y),
+                        egui::vec2(available_width, 4.0),
+                    );
+
+                    // 从蓝到白的渐变
+                    let blue = egui::Color32::from_rgb(0x4A, 0x90, 0xD9);
+                    let light = egui::Color32::from_rgb(0xAA, 0xCC, 0xEE);
+                    let current_color = egui::lerp(&blue, &light, progress);
+
+                    // 绘制动画条（从左到右滚动）
+                    let bar_width = available_width * 0.3;
+                    let offset = ((time * 60.0) % (available_width + bar_width)) - bar_width;
+                    let indicator_rect = egui::Rect::from_min_size(
+                        egui::pos2(offset, ui.cursor().min.y),
+                        egui::vec2(bar_width, 4.0),
+                    );
+                    painter.rect_filled(indicator_rect, 0.0, current_color);
+
+                    // 占用空间
+                    ui.allocate_space(egui::vec2(available_width, 4.0));
+                });
+        }
+
         // 日志面板
         egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| {
             ui.heading("Chrome 多进程 IPC 日志");

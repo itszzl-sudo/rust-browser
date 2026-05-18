@@ -69,8 +69,8 @@ pub struct TaffyLayoutNode {
     pub font_size: f32,
     /// 字体颜色
     pub font_color: Option<Color>,
-    /// 字体族
-    pub font_family: Option<String>,
+    /// 字体族（备选链，按优先级排序）
+    pub font_family: Vec<String>,
     /// CSS position
     pub position_type: PositionType,
     /// CSS float
@@ -101,6 +101,8 @@ pub struct TaffyLayoutEngine {
     style_map: StyleMap,
     /// 总节点数
     total_node_count: usize,
+    /// 当前 hover 的 dom 节点索引
+    pub hovered_node: Option<usize>,
 }
 
 impl TaffyLayoutEngine {
@@ -124,6 +126,7 @@ impl TaffyLayoutEngine {
             viewport,
             style_map: StyleMap::new(),
             total_node_count: 0,
+            hovered_node: None,
         }
     }
 
@@ -213,6 +216,19 @@ impl TaffyLayoutEngine {
                 self.style_map.get(&tag_name).cloned().unwrap_or_default();
             merged_decls.extend(inline_decls);
 
+            // 如果是 hover 节点，查找并应用 :hover 伪类声明
+            if Some(dom_idx) == self.hovered_node {
+                let hover_tag = format!("{}:hover", tag_name);
+                if let Some(hover_decls) = self.style_map.get(&hover_tag) {
+                    // hover 声明覆盖当前声明
+                    for hd in hover_decls {
+                        // 移除同名的旧声明（hover 优先级更高）
+                        merged_decls.retain(|d| d.property != hd.property);
+                        merged_decls.push(hd.clone());
+                    }
+                }
+            }
+
             // 确定样式
             let style = self.determine_style(&tag_name, &merged_decls);
 
@@ -300,6 +316,7 @@ impl TaffyLayoutEngine {
     }
 
     /// 用 cosmic-text 测量文本高度
+    /// 支持 font-family 备选链：依次尝试备选字体，第一个成功的就使用
     fn measure_text_height(&self, text: &str, font_size: f32, line_height: f32) -> f32 {
         if text.trim().is_empty() {
             return 0.0;
@@ -646,19 +663,22 @@ impl TaffyLayoutEngine {
         self.determine_color(decls)
     }
 
-    /// 确定 font-family
-    fn determine_font_family(&self, decls: &[Declaration]) -> Option<String> {
+    /// 确定 font-family（返回备选链，按优先级排序）
+    fn determine_font_family(&self, decls: &[Declaration]) -> Vec<String> {
         if let Some(ff) = get_declaration(decls, "font-family") {
-            // 去除引号
-            let cleaned = ff
+            // 去除引号，按逗号分割，返回所有备选字体
+            let families: Vec<String> = ff
                 .replace('"', "")
                 .replace('\'', "")
                 .split(',')
-                .next()
-                .map(|s| s.trim().to_string());
-            return cleaned;
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !families.is_empty() {
+                return families;
+            }
         }
-        None
+        Vec::new()
     }
 
     /// 确定 line-height，返回倍率（如 1.375）。默认返回 0.0（调用方用 font_size * 1.375）
@@ -850,6 +870,11 @@ impl TaffyLayoutEngine {
         self.style_map = map;
     }
 
+    /// 设置 hover 节点
+    pub fn set_hovered_node(&mut self, dom_node: Option<usize>) {
+        self.hovered_node = dom_node;
+    }
+
     /// 获取 dom → layout 映射
     pub fn dom_to_layout_map(&self) -> &HashMap<usize, usize> {
         &self.dom_to_layout
@@ -873,6 +898,7 @@ impl TaffyLayoutEngine {
         self.root = None;
         self.style_map.clear();
         self.total_node_count = 0;
+        self.hovered_node = None;
     }
 
     /// 返回处理的节点总数

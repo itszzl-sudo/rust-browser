@@ -129,6 +129,8 @@ pub struct Renderer {
     last_taffy: Option<TaffyLayoutEngine>,
     /// 超长截图的 PNG 缓存（完整页面高度）
     page_png: Option<Vec<u8>>,
+    /// 是否正在加载
+    pub is_loading: bool,
 }
 
 impl Renderer {
@@ -154,6 +156,7 @@ impl Renderer {
             title: None,
             last_taffy: None,
             page_png: None,
+            is_loading: false,
         }
     }
 
@@ -178,7 +181,10 @@ impl Renderer {
     /// 渲染存储的文档到 PNG
     pub fn render_to_png(&mut self) -> Result<Vec<u8>, RenderError> {
         let doc = self.document.clone();
-        self.render(&doc)
+        self.is_loading = true;
+        let result = self.render(&doc);
+        self.is_loading = false;
+        result
     }
 
     /// 调整大小（resize 是 set_viewport 的别名）
@@ -188,6 +194,7 @@ impl Renderer {
 
     pub fn render(&mut self, document: &Option<Document>) -> Result<Vec<u8>, RenderError> {
         info!("开始渲染");
+        self.is_loading = true;
 
         self.painter.set_background(Color::WHITE);
         self.painter.paint();
@@ -198,6 +205,7 @@ impl Renderer {
             self.render_blank_page()?;
         }
 
+        self.is_loading = false;
         Ok(self.painter.to_png())
     }
 
@@ -292,6 +300,7 @@ impl Renderer {
         dom: &DomWrapper,
         taffy: &TaffyLayoutEngine,
     ) -> Result<Vec<u8>, RenderError> {
+        self.is_loading = true;
         self.painter.set_background(Color::WHITE);
         self.painter.paint();
 
@@ -304,6 +313,7 @@ impl Renderer {
             renderer.render_dom();
         }
 
+        self.is_loading = false;
         Ok(self.painter.to_png())
     }
 
@@ -364,6 +374,26 @@ impl Renderer {
     /// 获取最近一次渲染的 Taffy 布局引擎引用
     pub fn taffy_layout(&self) -> Option<&TaffyLayoutEngine> {
         self.last_taffy.as_ref()
+    }
+
+    /// 设置 hovered_node 并重新渲染
+    pub fn set_hovered_node(&mut self, dom_node: Option<usize>) -> Option<Vec<u8>> {
+        if self
+            .last_taffy
+            .as_ref()
+            .map(|t| t.hovered_node != dom_node)
+            .unwrap_or(false)
+        {
+            if let Some(ref mut taffy) = self.last_taffy {
+                taffy.set_hovered_node(dom_node);
+            }
+            // 使用 document 重新渲染（不走 render_with_taffy，避免双重借用）
+            if let Some(doc) = self.document.clone() {
+                let _ = self.render(&Some(doc));
+                return Some(self.painter.to_png());
+            }
+        }
+        None
     }
 
     /// 获取超长截图的 PNG 数据（如有）
@@ -656,6 +686,9 @@ impl<'a> TaffyRenderer<'a> {
                     let w = layout.width;
                     let h = layout.height;
 
+                    // 检查当前节点是否为 hover 节点，如果是则应用 hover 样式覆盖
+                    let is_hovered = Some(dom_idx) == self.taffy.hovered_node;
+
                     // 渲染元素背景
                     if let Some(bg) = &layout.background {
                         self.painter.draw_rect(x, y, w, h, bg);
@@ -669,6 +702,12 @@ impl<'a> TaffyRenderer<'a> {
 
                     // 渲染元素装饰（边框等）+ 传入 node_ref 用于 img src
                     self.render_element_box(&tag_name, x, y, w, h, Some(node_ref));
+
+                    // 如果是 hover 节点，绘制高亮边框
+                    if is_hovered {
+                        self.painter
+                            .draw_rect_border(x, y, w, h, 2.0, &Color::from_hex("#4A90D9"));
+                    }
 
                     // 渲染图片元素
                     if tag_name == "img" {
@@ -948,6 +987,7 @@ impl<'a> TaffyRenderer<'a> {
     }
 
     /// 使用 cosmic-text 渲染文本（支持 font_size 和 color 参数）
+    /// 支持 font-family 备选链
     fn render_text_at(
         &mut self,
         text: &str,

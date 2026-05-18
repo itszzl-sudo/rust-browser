@@ -440,7 +440,36 @@ fn run_renderer_process(
                     debug!("Renderer #{} Scroll event received", id);
                 }
                 "MouseMove" => {
-                    debug!("Renderer #{} MouseMove event received", id);
+                    let s = String::from_utf8_lossy(&msg.data);
+                    let parts: Vec<&str> = s.split('|').collect();
+                    if parts.len() >= 2 {
+                        let x: f32 = parts[0].parse().unwrap_or(0.0);
+                        let y: f32 = parts[1].parse().unwrap_or(0.0);
+                        debug!("Renderer #{} MouseMove at ({:.1}, {:.1})", id, x, y);
+
+                        // 在 Taffy 布局结果中查找 hover 节点
+                        if let Some(doc) = &renderer.document() {
+                            if let Some(taffy) = renderer.taffy_layout() {
+                                let hit = taffy.hit_test(x, y);
+                                let hovered_dom = hit.map(|n| n.dom_node);
+
+                                // 如果 hover 节点变化，更新并重新渲染
+                                if taffy.hovered_node != hovered_dom {
+                                    if let Some(new_png) = renderer.set_hovered_node(hovered_dom) {
+                                        let (w, h) = renderer.context().viewport();
+                                        let title = renderer.title().map(|t| t.to_string());
+                                        let result = RenderResultMessage {
+                                            png_data: new_png,
+                                            width: w,
+                                            height: h,
+                                            title,
+                                        };
+                                        let _ = result_proxy.send_message(result.to_message());
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {
                     debug!("Renderer #{} 未知输入消息: {}", id, msg.name);
