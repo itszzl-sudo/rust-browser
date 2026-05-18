@@ -369,6 +369,33 @@ impl Renderer {
         Ok(())
     }
 
+    /// 渲染 loading 画面（在真正渲染完成前立即返回，不耗时）
+    /// 只画白底 + 中央蓝色条，不碰布局状态。
+    pub fn render_loading_page(&mut self) -> Result<Vec<u8>, RenderError> {
+        let (width, height) = self.context.viewport();
+        self.painter.set_background(Color::WHITE);
+        self.painter.paint();
+
+        // 中央蓝色条
+        let bar_w = (width as f32 * 0.6).min(300.0);
+        let bar_h = 4.0;
+        let bar_x = (width as f32 - bar_w) / 2.0;
+        let bar_y = height as f32 / 2.0;
+
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(0x4A, 0x90, 0xD9, 200);
+        if let Some(rect) = tiny_skia::Rect::from_xywh(bar_x, bar_y, bar_w, bar_h) {
+            self.painter.pixmap_mut().fill_rect(
+                rect,
+                &paint,
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+
+        Ok(self.painter.to_png())
+    }
+
     pub fn capture_viewport(&self) -> Vec<u8> {
         self.painter.to_png()
     }

@@ -16,6 +16,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
+#[cfg(not(feature = "gui"))]
+use std::time::Duration;
+
 // 全局日志消息
 static LOG_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -58,6 +61,7 @@ struct Args {
 }
 
 /// Chrome 风格的多进程浏览器应用
+#[cfg(feature = "gui")]
 struct BrowserApp {
     /// 浏览器进程宿主（管理渲染器进程）
     browser_host: Option<BrowserProcessHost>,
@@ -82,8 +86,19 @@ struct BrowserApp {
     /// 视口尺寸
     width: u32,
     height: u32,
+    /// 导航历史（用于后退/前进）
+    nav_history: Vec<String>,
+    /// 当前在历史中的位置
+    nav_history_pos: i32,
+    /// 是否显示书签栏
+    show_bookmarks: bool,
+    /// 是否显示调试日志面板
+    show_log_panel: bool,
+    /// 书签列表
+    bookmarks: Vec<(String, String)>,
 }
 
+#[cfg(feature = "gui")]
 impl BrowserApp {
     fn new(initial_url: String, width: u32, height: u32) -> Self {
         add_log_message("=== Rust Browser (Chrome 多进程架构) ===".to_string());
@@ -118,13 +133,27 @@ impl BrowserApp {
             url_input: initial_url.clone(),
             image_data: None,
             error_message: None,
-            initial_url,
             is_loading: false,
             first_frame: true,
             load_start_time: None,
             auto_load_pending: true,
             width,
             height,
+            nav_history: vec![initial_url.clone()],
+            initial_url,
+            nav_history_pos: 0,
+            show_bookmarks: true,
+            show_log_panel: false,
+            bookmarks: vec![
+                ("百度".to_string(), "https://www.baidu.com".to_string()),
+                ("谷歌".to_string(), "https://www.google.com".to_string()),
+                ("GitHub".to_string(), "https://github.com".to_string()),
+                ("Rust".to_string(), "https://www.rust-lang.org".to_string()),
+                (
+                    "Hacker News".to_string(),
+                    "https://news.ycombinator.com".to_string(),
+                ),
+            ],
         }
     }
 
@@ -167,15 +196,27 @@ impl BrowserApp {
     }
 
     fn navigate(&mut self, url: &str) {
-        add_log_message(format!("Mojo IPC 导航到: {}", url));
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        add_log_message(format!("Mojo IPC 导航到: {}", trimmed));
         self.is_loading = true;
         self.error_message = None;
         self.load_start_time = Some(Instant::now());
 
         if let Some(ref host) = self.browser_host {
-            match host.navigate(url) {
+            match host.navigate(trimmed) {
                 Ok(_) => {
-                    self.url_input = url.to_string();
+                    self.url_input = trimmed.to_string();
+                    // 更新导航历史
+                    if self.nav_history_pos < self.nav_history.len() as i32 - 1 {
+                        self.nav_history
+                            .truncate((self.nav_history_pos + 1) as usize);
+                    }
+                    self.nav_history.push(trimmed.to_string());
+                    self.nav_history_pos = self.nav_history.len() as i32 - 1;
                     add_log_message("导航消息已通过 IPC 发送到渲染器".to_string());
                 }
                 Err(e) => {
@@ -190,24 +231,49 @@ impl BrowserApp {
             self.is_loading = false;
         }
     }
+
+    fn go_back(&mut self) {
+        if self.nav_history_pos > 0 {
+            self.nav_history_pos -= 1;
+            let url = self.nav_history[self.nav_history_pos as usize].clone();
+            self.navigate(&url);
+        }
+    }
+
+    fn go_forward(&mut self) {
+        if (self.nav_history_pos as usize) < self.nav_history.len() - 1 {
+            self.nav_history_pos += 1;
+            let url = self.nav_history[self.nav_history_pos as usize].clone();
+            self.navigate(&url);
+        }
+    }
+
+    fn refresh(&mut self) {
+        if let Some(current_url) = self.nav_history.last().cloned() {
+            self.navigate(&current_url);
+        }
+    }
 }
 
+#[cfg(feature = "gui")]
 impl eframe::App for BrowserApp {
     fn ui(&mut self, ctx: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // 首帧初始化 - 等待渲染器自动加载结果
+        // ── 首帧初始化 ──
         if self.first_frame {
             self.first_frame = false;
             add_log_message("窗口已显示，等待渲染器加载首页...".to_string());
             info!("首帧渲染完成，窗口已显示");
-
-            // 渲染器进程启动时已自动开始加载 initial_url
-            // 这里只需要开始计时等待结果
             self.is_loading = true;
             self.load_start_time = Some(Instant::now());
         }
 
         // 每帧尝试接收渲染结果
         self.refresh_from_renderer();
+
+        // 清除首帧自动加载标记（收到渲染帧后设置为false）
+        if self.image_data.is_some() {
+            self.auto_load_pending = false;
+        }
 
         // 加载超时处理
         if self.is_loading {
@@ -221,253 +287,328 @@ impl eframe::App for BrowserApp {
             }
         }
 
-        // 处理键盘事件
-        ctx.input(|i| {
-            for event in &i.events {
-                if let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } = event
-                {
-                    // 只在 Ctrl 未按下时处理（避免冲突）
-                    if !modifiers.ctrl && !modifiers.mac_cmd {
-                        let key_str = match key {
-                            _ => key.name().to_string(),
-                        };
-
-                        if let Some(ref host) = self.browser_host {
-                            add_log_message(format!("键盘输入: {}", key_str));
-                            let _ = host.send_input(
-                                rust_browser::browser_process::interfaces::InputEvent::KeyPress {
-                                    key: key_str,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-        });
-
         // 在每一帧运行 TaskQueue 的 main thread 任务
         GLOBAL_SCHEDULER.run_main_tasks();
 
         ctx.set_visuals(egui::Visuals::dark());
 
-        // 顶部标签页栏 + URL 输入
-        {
-            // 预先收集标签页数据，避免在闭包中同时借用 self
-            let tabs_data: Vec<(u64, String, bool)> = if let Some(ref host) = self.browser_host {
-                let active_id = self.active_renderer_id;
-                host.renderer_ids()
-                    .iter()
-                    .map(|&tab_id| {
-                        let is_active = Some(tab_id) == active_id;
-                        let label = if let Some(renderer) = host.get_renderer(tab_id) {
-                            if let Some(ref title) = renderer.title {
-                                format!("{}", title)
+        // ═══════════════════════════════════════════
+        // 顶部面板
+        // ═══════════════════════════════════════════
+
+        let tabs_data: Vec<(u64, String, bool)> = if let Some(ref host) = self.browser_host {
+            let active_id = self.active_renderer_id;
+            host.renderer_ids()
+                .iter()
+                .map(|&tab_id| {
+                    let is_active = Some(tab_id) == active_id;
+                    let label = if let Some(renderer) = host.get_renderer(tab_id) {
+                        if let Some(ref title) = renderer.title {
+                            if title.is_empty() {
+                                format!("Tab #{}", tab_id)
                             } else {
-                                let url = &renderer.url;
-                                let short_url = url
-                                    .trim_start_matches("https://")
-                                    .trim_start_matches("http://")
-                                    .trim_end_matches('/');
-                                if short_url.is_empty() {
-                                    format!("标签 #{}", tab_id)
-                                } else {
-                                    format!("{} #{}", short_url, tab_id)
-                                }
+                                title.clone()
                             }
                         } else {
-                            format!("标签 #{}", tab_id)
-                        };
-                        (tab_id, label, is_active)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            let renderer_count = self
-                .browser_host
-                .as_ref()
-                .map(|h| h.renderer_ids().len())
-                .unwrap_or(0);
-
-            egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for (tab_id, label, is_active) in &tabs_data {
-                        let btn = if *is_active {
-                            ui.selectable_label(true, label)
-                        } else {
-                            ui.selectable_label(false, label)
-                        };
-
-                        if btn.clicked() && !is_active {
-                            add_log_message(format!("切换到标签页 #{}", tab_id));
-                            if let Some(ref mut host) = self.browser_host {
-                                host.switch_to_tab(*tab_id);
-                                self.active_renderer_id = Some(*tab_id);
-                                self.refresh_from_renderer();
+                            let short = renderer
+                                .url
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                                .trim_end_matches('/');
+                            if short.is_empty() {
+                                format!("Tab #{}", tab_id)
+                            } else {
+                                short.to_string()
                             }
                         }
+                    } else {
+                        format!("Tab #{}", tab_id)
+                    };
+                    (tab_id, label, is_active)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let renderer_count = self
+            .browser_host
+            .as_ref()
+            .map(|h| h.renderer_ids().len())
+            .unwrap_or(0);
 
-                        // 关闭标签页按钮（保留至少一个）
-                        if renderer_count > 1 {
-                            if ui.button("✕").clicked() {
-                                add_log_message(format!("关闭标签页 #{}", tab_id));
-                                if let Some(ref mut host) = self.browser_host {
-                                    host.close_renderer(*tab_id);
-                                    self.active_renderer_id = host.active_renderer().map(|r| r.id);
-                                    self.refresh_from_renderer();
-                                }
-                                ui.close();
-                            }
+        // ── 标签页栏 ──
+        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (tab_id, label, is_active) in &tabs_data {
+                    let resp = if *is_active {
+                        ui.selectable_label(true, label)
+                    } else {
+                        ui.selectable_label(false, label)
+                    };
+                    if resp.clicked() && !is_active {
+                        add_log_message(format!("切换到 Tab #{}", tab_id));
+                        if let Some(ref mut host) = self.browser_host {
+                            host.switch_to_tab(*tab_id);
+                            self.active_renderer_id = Some(*tab_id);
+                            self.refresh_from_renderer();
                         }
                     }
-
-                    // 新建标签页按钮
-                    if ui.button("+").clicked() {
-                        add_log_message("新建空白标签页".to_string());
-                        if let Some(ref mut host) = self.browser_host {
-                            match host.spawn_renderer("about:blank", self.width, self.height) {
-                                Ok(new_id) => {
-                                    self.active_renderer_id = Some(new_id);
-                                    self.refresh_from_renderer();
-                                    add_log_message(format!("新标签页 #{} 已创建", new_id));
-                                }
-                                Err(e) => {
-                                    add_log_message(format!("创建标签页失败: {}", e));
-                                }
+                    if renderer_count > 1 {
+                        if ui.button("x").clicked() {
+                            add_log_message(format!("关闭 Tab #{}", tab_id));
+                            if let Some(ref mut host) = self.browser_host {
+                                host.close_renderer(*tab_id);
+                                self.active_renderer_id = host.active_renderer().map(|r| r.id);
+                                self.refresh_from_renderer();
                             }
+                            ui.close();
+                        }
+                    }
+                }
+                if ui.button("+").clicked() {
+                    add_log_message("新建 Tab".to_string());
+                    if let Some(ref mut host) = self.browser_host {
+                        if let Ok(new_id) =
+                            host.spawn_renderer("about:blank", self.width, self.height)
+                        {
+                            self.active_renderer_id = Some(new_id);
+                            self.refresh_from_renderer();
+                        }
+                    }
+                }
+            });
+        });
+
+        // ── 导航栏 ──
+        egui::TopBottomPanel::top("nav_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+
+                // 后退
+                let back_enabled = self.nav_history_pos > 0;
+                if ui
+                    .add_enabled(back_enabled, egui::Button::new("<"))
+                    .clicked()
+                {
+                    self.go_back();
+                }
+
+                // 前进
+                let fwd_enabled =
+                    (self.nav_history_pos as usize) < self.nav_history.len().saturating_sub(1);
+                if ui
+                    .add_enabled(fwd_enabled, egui::Button::new(">"))
+                    .clicked()
+                {
+                    self.go_forward();
+                }
+
+                // 刷新
+                if ui.button("\u{21bb}").clicked() {
+                    self.refresh();
+                }
+
+                // URL 地址栏（可伸缩占满空间）
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.url_input)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("URL 输入后 Enter 导航"),
+                );
+
+                // 转到按钮
+                if ui.button("Go").clicked() && !self.url_input.is_empty() {
+                    let url = self.url_input.clone();
+                    if !url.starts_with("http://")
+                        && !url.starts_with("https://")
+                        && !url.starts_with("file://")
+                        && url != "about:blank"
+                    {
+                        self.url_input = format!("https://{}", url);
+                    }
+                    self.navigate(&self.url_input.clone());
+                }
+
+                // 书签切换按钮
+                let bk_label = if self.show_bookmarks {
+                    "▼BK"
+                } else {
+                    "▶BK"
+                };
+                if ui.button(bk_label).clicked() {
+                    self.show_bookmarks = !self.show_bookmarks;
+                }
+
+                // 调试日志切换按钮
+                let log_label = if self.show_log_panel {
+                    "▼LOG"
+                } else {
+                    "▶LOG"
+                };
+                if ui.button(log_label).clicked() {
+                    self.show_log_panel = !self.show_log_panel;
+                }
+            });
+
+            // ── 加载进度条 ──
+            if self.is_loading {
+                let w = ui.available_width();
+                let time = ctx.input(|i| i.time);
+                let p = ((time * 2.0).sin() * 0.5 + 0.5) as f32;
+                let painter = ui.painter();
+                let bar_y = ui.cursor().min.y;
+                let c = egui::Color32::from_rgb(0x4A, 0x90, 0xD9)
+                    .lerp_to_gamma(egui::Color32::from_rgb(0xAA, 0xCC, 0xEE), p);
+                let bw = w * 0.3;
+                let off = (((time * 60.0) as f32) % (w + bw)) - bw;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(off, bar_y), egui::vec2(bw, 3.0)),
+                    0.0,
+                    c,
+                );
+                ui.allocate_space(egui::vec2(w, 3.0));
+            }
+        });
+
+        // ── 书签栏 ──
+        if self.show_bookmarks && !self.bookmarks.is_empty() {
+            let bookmarks = self.bookmarks.clone();
+            egui::TopBottomPanel::top("bookmark_bar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    for (name, url) in &bookmarks {
+                        if ui.link(name).clicked() {
+                            self.url_input = url.clone();
+                            self.navigate(url);
+                            self.show_bookmarks = false; // 点击书签后自动隐藏书签栏
                         }
                     }
                 });
             });
         }
 
-        // 加载进度条（显示在导航栏下方）
-        if self.is_loading {
-            egui::TopBottomPanel::top("loading_bar")
-                .min_size(4.0)
-                .show(ctx, |ui| {
-                    ui.set_min_height(4.0);
-                    let available_width = ui.available_width();
-                    let time = ctx.input(|i| i.time);
-                    // 制作一个从蓝到白的渐变动画条
-                    let progress = ((time * 2.0).sin() * 0.5 + 0.5) as f32; // 0~1 呼吸
-
-                    // 绘制进度条背景
-                    let painter = ui.painter();
-                    let _bar_rect = egui::Rect::from_min_size(
-                        egui::pos2(0.0, ui.cursor().min.y),
-                        egui::vec2(available_width, 4.0),
-                    );
-
-                    // 从蓝到白的渐变
-                    let blue = egui::Color32::from_rgb(0x4A, 0x90, 0xD9);
-                    let light = egui::Color32::from_rgb(0xAA, 0xCC, 0xEE);
-                    let current_color = blue.lerp_to_gamma(light, progress);
-
-                    // 绘制动画条（从左到右滚动）
-                    let bar_width = available_width * 0.3;
-                    let offset =
-                        (((time * 60.0) as f32) % (available_width + bar_width)) - bar_width;
-                    let indicator_rect = egui::Rect::from_min_size(
-                        egui::pos2(offset, ui.cursor().min.y),
-                        egui::vec2(bar_width, 4.0),
-                    );
-                    painter.rect_filled(indicator_rect, 0.0, current_color);
-
-                    // 占用空间
-                    ui.allocate_space(egui::vec2(available_width, 4.0));
-                });
-        }
-
-        // 日志面板
-        egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| {
-            ui.heading("Chrome 多进程 IPC 日志");
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    let logs = get_log_messages();
-                    for log in logs.iter().rev().take(20) {
-                        ui.label(log.clone());
+        // ═══════════════════════════════════════════
+        // 底部面板：调试日志
+        // ═══════════════════════════════════════════
+        if self.show_log_panel {
+            egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("IPC 日志");
+                    if ui.button("清空").clicked() {
+                        if let Ok(mut logs) = LOG_MESSAGES.lock() {
+                            logs.clear();
+                        }
                     }
                 });
-        });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        let logs = get_log_messages();
+                        for log in logs.iter().rev().take(30) {
+                            ui.label(log);
+                        }
+                    });
+            });
+        }
 
-        // 中央面板 - 页面显示区域
+        // ═══════════════════════════════════════════
+        // 中央面板：页面显示
+        // ═══════════════════════════════════════════
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.set_min_size(egui::vec2(800.0, 600.0));
+            // 自动撑满可用空间
+            let available = ui.available_size();
+            ui.set_min_size(available);
 
             if let Some(error) = &self.error_message {
                 ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new(error).color(egui::Color32::RED).size(18.0));
+                    ui.label(
+                        egui::RichText::new(error)
+                            .color(egui::Color32::RED)
+                            .size(18.0),
+                    );
                 });
             } else if let Some(image_data) = &self.image_data {
+                let img_size = egui::vec2(image_data.width() as f32, image_data.height() as f32);
                 let texture = ctx.load_texture(
                     "browser_content",
                     image_data.clone(),
                     egui::TextureOptions::default(),
                 );
 
-                ui.centered_and_justified(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), ui.available_height()),
-                        egui::Sense::click(),
-                    );
+                let available = ui.available_size();
+                let (rect, _) = ui.allocate_exact_size(available, egui::Sense::click());
 
-                    // 检测鼠标点击并通过 IPC 发送到渲染器
-                    let click_resp = ui.interact(rect, ui.next_auto_id(), egui::Sense::click());
-                    if click_resp.clicked_by(egui::PointerButton::Primary) {
-                        if let Some(pos) = ctx.pointer_interact_pos() {
-                            if let Some(ref host) = self.browser_host {
-                                add_log_message(format!("页面点击: ({:.0}, {:.0})", pos.x, pos.y));
-                                let _ = host.send_input(
-                                    rust_browser::browser_process::interfaces::InputEvent::MouseClick {
-                                        x: pos.x as f32,
-                                        y: pos.y as f32,
-                                        button: 0,
-                                    },
-                                );
-                            }
+                // 等比例缩放显示，居中
+                let scale = (available.x / img_size.x)
+                    .min(available.y / img_size.y)
+                    .min(1.0);
+                let scaled_size = img_size * scale;
+                let offset = egui::vec2(
+                    (available.x - scaled_size.x).max(0.0) * 0.5,
+                    (available.y - scaled_size.y).max(0.0) * 0.5,
+                );
+                let image_rect = egui::Rect::from_min_size(rect.min + offset, scaled_size);
+
+                let click_resp = ui.interact(rect, ui.next_auto_id(), egui::Sense::click());
+                if click_resp.clicked_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = ctx.pointer_interact_pos() {
+                        // 将点击坐标映射到图像坐标系
+                        let img_x =
+                            ((pos.x - image_rect.min.x) / scaled_size.x * img_size.x).max(0.0);
+                        let img_y =
+                            ((pos.y - image_rect.min.y) / scaled_size.y * img_size.y).max(0.0);
+                        if let Some(ref host) = self.browser_host {
+                            add_log_message(format!("页面点击: ({:.0}, {:.0})", img_x, img_y));
+                            let _ = host.send_input(
+                                rust_browser::browser_process::interfaces::InputEvent::MouseClick {
+                                    x: img_x,
+                                    y: img_y,
+                                    button: 0,
+                                },
+                            );
                         }
                     }
+                }
 
-                    // 显示图像
-                    ui.put(rect, egui::Image::new(&texture));
-                });
+                ui.put(image_rect, egui::Image::new(&texture));
             } else if self.auto_load_pending || self.is_loading {
                 ui.centered_and_justified(|ui| {
                     ui.label("Rust Browser (Chrome 架构) - 初始化中...");
                 });
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Rust Browser (Chrome 架构)");
+                    ui.heading("Rust Browser");
+                    ui.label("输入 URL 并按 Enter 开始浏览");
                 });
             }
-
-            // 显示架构信息
-            ui.horizontal(|ui| {
-                ui.label("架构:");
-                ui.colored_label(
-                    egui::Color32::GREEN,
-                    format!(
-                        "BrowserProcess(1) ↔ RendererProcess({}) via Mojo IPC | TaskQueue({} threads)",
-                        self.browser_host
-                            .as_ref()
-                            .map(|h| h.renderer_count())
-                            .unwrap_or(0),
-                        std::thread::available_parallelism()
-                            .map(|n| n.get())
-                            .unwrap_or(4),
-                    ),
-                );
-            });
         });
+
+        // ── 键盘事件：Enter 导航 ──
+        let enter_pressed = ctx.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        pressed: true,
+                        ..
+                    }
+                )
+            })
+        });
+        if enter_pressed && !self.url_input.is_empty() {
+            let url = self.url_input.clone();
+            if !url.starts_with("http://")
+                && !url.starts_with("https://")
+                && !url.starts_with("file://")
+                && url != "about:blank"
+            {
+                self.url_input = format!("https://{}", url);
+            }
+            self.navigate(&self.url_input.clone());
+        }
     }
 }
 
@@ -499,6 +640,47 @@ fn run_screenshot_mode(args: &Args) -> Result<(), String> {
         }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// 无头模式入口：没有 GUI，直接渲染并输出
+#[cfg(not(feature = "gui"))]
+fn main() -> Result<(), String> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs()
+        .init();
+
+    info!("Rust Browser (Headless 模式) 启动");
+    println!("Rust Browser (Headless 模式)");
+
+    let args = Args::parse();
+    println!("目标 URL: {}", args.url);
+
+    let mut host = BrowserProcessHost::new();
+    let renderer_id = host.spawn_renderer(&args.url, args.width, args.height)?;
+    println!("✓ 渲染器进程 #{} 已启动", renderer_id);
+
+    // 等待渲染结果
+    let start = Instant::now();
+    loop {
+        if let Some(result) = host.try_receive_result() {
+            println!("✓ 收到渲染帧: {}x{}", result.width, result.height);
+
+            if let Some(output_path) = &args.output {
+                println!("正在保存截图到: {:?}", output_path);
+                std::fs::write(output_path, &result.png_data)
+                    .map_err(|e| format!("保存文件失败: {}", e))?;
+                println!("✓ 截图保存成功");
+            }
+
+            return Ok(());
+        }
+
+        if start.elapsed().as_secs() > 30 {
+            return Err("等待渲染结果超时".to_string());
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

@@ -1,7 +1,7 @@
 //! WebNativeBridge 默认实现 —— 基于 rust-browser 渲染引擎
 //!
 //! 实现 [`bridge::WebNativeBridge`] trait，接入 kuchiki DOM、
-//! Taffy 布局、tiny-skia 渲染和 Boa/obscura-js JS 引擎。
+//! Taffy 布局、tiny-skia 渲染和 Boa/V8 JS 引擎。
 
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use crate::dom_wrapper::DomWrapper;
 use crate::renderer::taffy_layout::{TaffyLayoutEngine, TaffyLayoutNode};
 use crate::renderer::Renderer;
 
-#[cfg(any(feature = "js", feature = "boa"))]
+#[cfg(any(feature = "v8", feature = "boa"))]
 use crate::js_engine::JsEngine;
 
 /// Web → Native 桥接器默认实现
@@ -48,7 +48,7 @@ pub struct DefaultWebNativeBridge {
     /// 网络客户端
     network_client: crate::network::NetworkClient,
 
-    #[cfg(any(feature = "js", feature = "boa"))]
+    #[cfg(any(feature = "v8", feature = "boa"))]
     js_engine: JsEngine,
 }
 
@@ -93,7 +93,7 @@ impl WebNativeBridge for DefaultWebNativeBridge {
             click_handlers: HashMap::new(),
             form_handlers: HashMap::new(),
             window_open_handler: None,
-            #[cfg(any(feature = "js", feature = "boa"))]
+            #[cfg(any(feature = "v8", feature = "boa"))]
             js_engine: JsEngine::new(),
         }
     }
@@ -104,7 +104,7 @@ impl WebNativeBridge for DefaultWebNativeBridge {
         self.html = html.to_string();
         self.dom = DomWrapper::from_html(html, Some(&self.url));
 
-        #[cfg(any(feature = "js", feature = "boa"))]
+        #[cfg(any(feature = "v8", feature = "boa"))]
         {
             let _ = self.js_engine.initialize(&self.url);
             self.js_engine.set_url(&self.url);
@@ -202,7 +202,7 @@ impl WebNativeBridge for DefaultWebNativeBridge {
     // ── JS 执行 ──
 
     fn eval_js(&mut self, code: &str) -> String {
-        #[cfg(any(feature = "js", feature = "boa"))]
+        #[cfg(any(feature = "v8", feature = "boa"))]
         {
             if !self.js_engine.is_ready() {
                 let _ = self.js_engine.initialize(&self.url);
@@ -211,7 +211,7 @@ impl WebNativeBridge for DefaultWebNativeBridge {
                 .evaluate(code)
                 .unwrap_or_else(|e| format!("JS Error: {}", e))
         }
-        #[cfg(not(any(feature = "js", feature = "boa")))]
+        #[cfg(not(any(feature = "v8", feature = "boa")))]
         {
             let _ = code;
             "undefined".to_string()

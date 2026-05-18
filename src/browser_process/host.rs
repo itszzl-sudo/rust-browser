@@ -302,9 +302,24 @@ fn run_renderer_process(
     let mut current_url = initial_url.clone();
     let mut running = true;
 
-    // 首次导航
+    // 首次导航：立即发送 loading 帧，然后异步加载文档并渲染
     if !current_url.is_empty() {
         info!("Renderer #{} 首次导航到: {}", id, current_url);
+
+        // 第一步：先发送 loading 画面
+        if let Ok(loading_png) = renderer.render_loading_page() {
+            let _ = result_proxy.send_message(
+                RenderResultMessage {
+                    png_data: loading_png,
+                    width,
+                    height,
+                    title: Some(format!("加载中…")),
+                }
+                .to_message(),
+            );
+        }
+
+        // 第二步：加载文档 + 渲染（耗时操作）
         match load_document(&current_url) {
             Ok(doc) => {
                 let title = doc.title.clone();
@@ -327,7 +342,6 @@ fn run_renderer_process(
             }
             Err(e) => {
                 warn!("Renderer #{} 首次加载文档失败: {}", id, e);
-                // 即使加载失败，也发送一个空白页面的渲染结果，让浏览器有内容显示
                 match renderer.render(&None) {
                     Ok(png) => {
                         let result = RenderResultMessage {
@@ -359,6 +373,20 @@ fn run_renderer_process(
                         let new_height = nav.height;
                         renderer.set_viewport(new_width, new_height);
 
+                        // 先发送 loading 帧
+                        if let Ok(loading_png) = renderer.render_loading_page() {
+                            let _ = result_proxy.send_message(
+                                RenderResultMessage {
+                                    png_data: loading_png,
+                                    width: new_width,
+                                    height: new_height,
+                                    title: Some(format!("加载中…")),
+                                }
+                                .to_message(),
+                            );
+                        }
+
+                        // 加载文档 + 渲染
                         if let Ok(doc) = load_document(&current_url) {
                             let title = doc.title.clone();
                             let doc_opt = Some(doc);

@@ -1,8 +1,8 @@
-//! JS 引擎 —— 多后端支持（obscura-js / Boa）
+//! JS 引擎 —— 多后端支持（deno_core(V8) / Boa）
 //!
 //! 通过 feature 切换后端：
 //! - `boa`（默认）：基于 Boa Engine（纯 Rust，无 V8 依赖）
-//! - `js`：基于 obscura-js（deno_core/V8）
+//! - `v8`：基于 deno_core（V8）
 //!
 //! # 公开 API
 //!
@@ -314,23 +314,24 @@ mod backend {
 pub struct JsEngine {
     #[cfg(feature = "boa")]
     inner: backend::BoaJsEngine,
-    #[cfg(feature = "js")]
+    #[cfg(feature = "v8")]
     inner: ObscuraJsEngine,
-    #[cfg(not(any(feature = "boa", feature = "js")))]
+    #[cfg(not(any(feature = "boa", feature = "v8")))]
     _dummy: (),
 }
 
-#[cfg(feature = "js")]
+#[cfg(feature = "v8")]
 mod js_backend {
+    use deno_core::{JsRuntime, RuntimeOptions};
     use log::info;
 
     pub struct ObscuraJsEngine {
-        runtime: Option<obscura_js::runtime::ObscuraJsRuntime>,
+        runtime: Option<JsRuntime>,
     }
 
     impl ObscuraJsEngine {
         pub fn new() -> Self {
-            info!("初始化 JS 引擎 (obscura-js + deno_core)");
+            info!("初始化 JS 引擎 (deno_core / V8)");
             Self { runtime: None }
         }
 
@@ -339,17 +340,107 @@ mod js_backend {
                 return Ok(());
             }
             info!("启动 V8 运行时, URL: {}", url);
-            let rt = obscura_js::runtime::ObscuraJsRuntime::with_base_url(url);
-            self.runtime = Some(rt);
-            info!("JS 引擎已就绪 (V8)");
+
+            let mut runtime = JsRuntime::new(RuntimeOptions {
+                ..Default::default()
+            });
+
+            // 注入 polyfill
+            let polyfill_js = r#"
+                if (typeof globalThis.console === 'undefined') {
+                    globalThis.console = {
+                        log: (...args) => {},
+                        warn: (...args) => {},
+                        error: (...args) => {},
+                        info: (...args) => {},
+                        debug: () => {},
+                        trace: () => {},
+                    };
+                }
+                if (typeof globalThis.setTimeout === 'undefined') {
+                    globalThis.setTimeout = (fn, ms) => { if (typeof fn === 'function') fn(); };
+                    globalThis.setInterval = (fn, ms) => { if (typeof fn === 'function') fn(); };
+                    globalThis.clearTimeout = () => {};
+                    globalThis.clearInterval = () => {};
+                    globalThis.requestAnimationFrame = (fn) => { if (typeof fn === 'function') fn(0); };
+                    globalThis.cancelAnimationFrame = () => {};
+                    globalThis.queueMicrotask = (fn) => { if (typeof fn === 'function') Promise.resolve().then(fn); };
+                }
+                if (typeof globalThis.document === 'undefined') {
+                    globalThis.document = {
+                        title: '', URL: '',
+                        createElement: (tag) => ({ tagName: tag, style: {}, setAttribute: () => {}, getAttribute: () => null, appendChild: () => {}, textContent: '' }),
+                        createTextNode: (text) => ({ nodeType: 3, textContent: text, data: text }),
+                        getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+                        body: { appendChild: () => {}, style: {} },
+                        head: { appendChild: () => {} },
+                        documentElement: { style: {} },
+                        addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => true,
+                    };
+                }
+                globalThis.window = globalThis;
+                globalThis.self = globalThis;
+                if (typeof globalThis.location === 'undefined') {
+                    globalThis.location = { href: '', protocol: 'https:', host: '', hostname: '', pathname: '/', search: '', hash: '', origin: '' };
+                }
+                if (typeof globalThis.navigator === 'undefined') {
+                    globalThis.navigator = { userAgent: 'RustBrowser/1.0', platform: 'Win32', language: 'zh-CN' };
+                }
+                globalThis.HTMLElement = function() {};
+                if (typeof globalThis.Event === 'undefined') {
+                    globalThis.Event = class Event { constructor(type) { this.type = type; this.defaultPrevented = false; } preventDefault() { this.defaultPrevented = true; } };
+                    globalThis.CustomEvent = class CustomEvent extends Event { constructor(type, detail) { super(type); this.detail = detail?.detail; } };
+                    globalThis.MouseEvent = class MouseEvent extends Event { constructor(type, init) { super(type); this.clientX = init?.clientX || 0; this.clientY = init?.clientY || 0; } };
+                    globalThis.KeyboardEvent = class KeyboardEvent extends Event { constructor(type, init) { super(type); this.key = init?.key || ''; this.code = init?.code || ''; } };
+                }
+            "#;
+
+            runtime
+                .execute_script("<polyfill>", polyfill_js.to_string())
+                .map_err(|e| format!("Polyfill 注入失败: {}", e))?;
+
+            info!("V8 运行时 polyfill 注入完成");
+            self.runtime = Some(runtime);
+            info!("JS 引擎已就绪 (V8 / deno_core)");
             Ok(())
         }
 
         pub fn evaluate(&mut self, code: &str) -> Result<String, String> {
             match self.runtime.as_mut() {
                 Some(rt) => {
-                    let result = rt.evaluate(code).map_err(|e| format!("{:?}", e))?;
-                    Ok(result.to_string())
+                    let result = rt
+                        .execute_script("<eval>", code.to_string())
+                        .map_err(|e| format!("JS error: {}", e))?;
+                    let scope = &mut rt.handle_scope();
+                    let local = deno_core::v8::Local::new(scope, result);
+                    if local.is_string() {
+                        let s = local.to_string(scope).unwrap();
+                        let rust_str = s.to_rust_string_lossy(scope);
+                        Ok(rust_str)
+                    } else if local.is_number() {
+                        let num = local.number_value(scope).unwrap_or(0.0);
+                        Ok(num.to_string())
+                    } else if local.is_boolean() {
+                        let b = local.boolean_value(scope);
+                        Ok(b.to_string())
+                    } else if local.is_undefined() || local.is_null() {
+                        Ok("undefined".to_string())
+                    } else if local.is_object() {
+                        let json_str = deno_core::v8::json::stringify(scope, local)
+                            .map(|s| s.to_rust_string_lossy(scope))
+                            .unwrap_or_else(|| {
+                                local
+                                    .to_string(scope)
+                                    .map(|s| s.to_rust_string_lossy(scope))
+                                    .unwrap_or_default()
+                            });
+                        Ok(json_str)
+                    } else {
+                        Ok(local
+                            .to_string(scope)
+                            .map(|s| s.to_rust_string_lossy(scope))
+                            .unwrap_or_default())
+                    }
                 }
                 None => Err("JS 引擎未初始化".to_string()),
             }
@@ -359,10 +450,9 @@ mod js_backend {
             self.runtime.is_some()
         }
 
-        pub fn set_url(&self, url: &str) {
-            if let Some(ref rt) = self.runtime {
-                rt.set_url(url);
-            }
+        pub fn set_url(&self, _url: &str) {
+            // deno_core 原生 JsRuntime 不需要手动设置 URL
+            // 当前 polyfill 中的 location 已经是只读的
         }
 
         pub fn dispatch_event(&mut self, node_id: u32, event_type: &str) -> Result<String, String> {
@@ -372,16 +462,10 @@ mod js_backend {
             );
             self.evaluate(&js)
         }
-
-        pub fn set_dom(&self, dom: obscura_dom::tree::DomTree) {
-            if let Some(ref rt) = self.runtime {
-                rt.set_dom(dom);
-            }
-        }
     }
 }
 
-#[cfg(feature = "js")]
+#[cfg(feature = "v8")]
 use js_backend::ObscuraJsEngine;
 
 impl JsEngine {
@@ -389,68 +473,68 @@ impl JsEngine {
         #[cfg(feature = "boa")]
         {
             info!("初始化 JS 引擎 (Boa 后端)");
-            Self {
+            return Self {
                 inner: backend::BoaJsEngine::new(),
-            }
+            };
         }
-        #[cfg(feature = "js")]
+        #[cfg(feature = "v8")]
         {
-            info!("初始化 JS 引擎 (obscura-js 后端)");
-            Self {
+            info!("初始化 JS 引擎 (deno_core 后端)");
+            return Self {
                 inner: ObscuraJsEngine::new(),
-            }
+            };
         }
-        #[cfg(not(any(feature = "boa", feature = "js")))]
+        #[cfg(not(any(feature = "boa", feature = "v8")))]
         {
-            info!("JS 引擎: 未启用 (启用 boa 或 js feature)");
-            Self { _dummy: () }
+            info!("JS 引擎: 未启用 (启用 boa 或 v8 feature)");
+            return Self { _dummy: () };
         }
     }
 
     pub fn initialize(&mut self, url: &str) -> Result<(), String> {
         #[cfg(feature = "boa")]
         {
-            self.inner.initialize(url)
+            return self.inner.initialize(url);
         }
-        #[cfg(feature = "js")]
+        #[cfg(feature = "v8")]
         {
-            self.inner.initialize(url)
+            return self.inner.initialize(url);
         }
-        #[cfg(not(any(feature = "boa", feature = "js")))]
+        #[cfg(not(any(feature = "boa", feature = "v8")))]
         {
             let _ = url;
-            Ok(())
+            return Ok(());
         }
     }
 
     pub fn evaluate(&mut self, code: &str) -> Result<String, String> {
         #[cfg(feature = "boa")]
         {
-            self.inner.evaluate(code)
+            return self.inner.evaluate(code);
         }
-        #[cfg(feature = "js")]
+        #[cfg(feature = "v8")]
         {
-            self.inner.evaluate(code)
+            return self.inner.evaluate(code);
         }
-        #[cfg(not(any(feature = "boa", feature = "js")))]
+        #[cfg(not(any(feature = "boa", feature = "v8")))]
         {
             let _ = code;
-            Err("JS 引擎未启用".to_string())
+            return Err("JS 引擎未启用".to_string());
         }
     }
 
     pub fn is_ready(&self) -> bool {
         #[cfg(feature = "boa")]
         {
-            self.inner.is_ready()
+            return self.inner.is_ready();
         }
-        #[cfg(feature = "js")]
+        #[cfg(feature = "v8")]
         {
-            self.inner.is_ready()
+            return self.inner.is_ready();
         }
-        #[cfg(not(any(feature = "boa", feature = "js")))]
+        #[cfg(not(any(feature = "boa", feature = "v8")))]
         {
-            false
+            return false;
         }
     }
 
@@ -459,11 +543,11 @@ impl JsEngine {
         {
             self.inner.set_url(url);
         }
-        #[cfg(feature = "js")]
+        #[cfg(feature = "v8")]
         {
             self.inner.set_url(url);
         }
-        #[cfg(not(any(feature = "boa", feature = "js")))]
+        #[cfg(not(any(feature = "boa", feature = "v8")))]
         {
             let _ = url;
         }
@@ -472,22 +556,17 @@ impl JsEngine {
     pub fn dispatch_event(&mut self, node_id: u32, event_type: &str) -> Result<String, String> {
         #[cfg(feature = "boa")]
         {
-            self.inner.dispatch_event(node_id, event_type)
+            return self.inner.dispatch_event(node_id, event_type);
         }
-        #[cfg(feature = "js")]
+        #[cfg(feature = "v8")]
         {
-            self.inner.dispatch_event(node_id, event_type)
+            return self.inner.dispatch_event(node_id, event_type);
         }
-        #[cfg(not(any(feature = "boa", feature = "js")))]
+        #[cfg(not(any(feature = "boa", feature = "v8")))]
         {
             let _ = (node_id, event_type);
-            Err("JS 引擎未启用".to_string())
+            return Err("JS 引擎未启用".to_string());
         }
-    }
-
-    #[cfg(feature = "js")]
-    pub fn set_dom(&self, dom: obscura_dom::tree::DomTree) {
-        self.inner.set_dom(dom);
     }
 }
 

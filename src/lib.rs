@@ -1,10 +1,10 @@
-//! Rust Browser - 基于 obscura + taffy + kuchiki 的浏览器引擎
+//! Rust Browser - 基于 taffy + kuchiki + tiny-skia 的浏览器引擎
 //!
 //! 这是一个轻量级的浏览器渲染引擎，使用 Rust 实现。
 //!
 //! # 特性
 //!
-//! - obscura-net 网络请求（超时、Cookie、gzip/brotli解压）
+//! - reqwest 网络请求（超时、Cookie、gzip/brotli解压）
 //! - kuchiki DOM 解析和 CSS 选择器
 //! - Taffy 布局引擎
 //! - tiny-skia 像素渲染
@@ -28,9 +28,9 @@ pub mod css;
 pub mod css_engine;
 pub mod dom_wrapper;
 
-// JS 引擎：支持 boa（默认，纯 Rust）和 js（V8/deno_core）两个后端
+// JS 引擎：支持 boa（默认，纯 Rust）和 v8（deno_core/V8）两个后端
 // 不带任一 feature 时 = 无 JS 引擎
-#[cfg(any(feature = "boa", feature = "js"))]
+#[cfg(any(feature = "boa", feature = "v8"))]
 pub mod js_engine;
 pub mod mojo;
 pub mod network;
