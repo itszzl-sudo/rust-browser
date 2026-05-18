@@ -149,13 +149,22 @@ bridge.handle_click(100.0, 200.0);
 
 | 类别 | 方法 | 说明 |
 |------|------|------|
-| DOM | `set_html`, `query`, `query_all`, `tag_name`, `get_attr`, `set_attr`, `text`, `query_text` | |
+| DOM | `set_html`, `query`, `query_all`, `tag_name`, `get_attr`, `set_attr`, `text`, `query_text`, `parent_node` | |
 | 布局 | `get_rect`, `all_rects`, `hit_test` | 绝对坐标 |
 | CSS | `set_css`, `set_style`, `clear_css` | |
 | JS | `eval_js` | 需 `boa`/`js` feature |
 | 渲染 | `render` → `Vec<u8>` | 自动长页面 |
 | 事件 | `on_click`, `on_form_submit`, `handle_click`, `handle_form_submit` | 冒泡机制 |
-| 工具 | `dom`, `dom_mut`, `renderer`, `layout`, `set_viewport`, `viewport` | |
+| 工具 | `set_viewport`, `viewport` | |
+
+### 独立接口定义
+
+`bridge.rs` 是**纯 trait 定义**，不依赖任何内部引擎类型。外部项目只需复制此文件，实现 `WebNativeBridge` trait 即可接入自己的渲染引擎。独立类型（`Color`、`LayoutRect`、`LayoutNode`、`Declaration`）均定义在 `bridge.rs` 内，无外部依赖。
+
+内置 Mock 测试覆盖全部 API（23 项全部通过）：
+
+```bash
+cargo test --lib bridge::tests --no-default-features --features headless
 
 ## 依赖库
 
@@ -175,24 +184,30 @@ bridge.handle_click(100.0, 200.0);
 ## 测试
 
 ```bash
-# bridge DOM 渲染 + 事件冒泡测试（推荐）
+# 1. Bridge Trait 接口测试（23项，不依赖渲染引擎）
+cargo test --lib bridge::tests --no-default-features --features headless
+
+# 2. 完整渲染测试（headless，输出 bridge_dom_test_output.png）
 cargo run --example bridge_dom_test --no-default-features --features headless
 
-# 百度渲染测试
+# 3. 百度渲染测试
 cargo run --example baidu_test
 
-# 网页加载测试
+# 4. 网页加载测试
 cargo run --example web_test
 ```
 
-`bridge_dom_test` 输出 `bridge_dom_test_output.png`，包含：
+### bridge_dom_test 输出内容
+
+`bridge_dom_test_output.png`（长页面截图，自动扩展高度）：
 - 蓝色头栏（标题 + 副标题）
-- 颜色色块（红/绿/蓝方块 + 橙/紫圆形，水平排列）
+- 颜色色块（红/绿/蓝方块 + 橙/紫圆形，Flex 水平排列）
 - 文本渲染测试（中英文混排 + 引用块）
-- 表格三栏布局
+- Flex 三栏布局（flex:1 / flex:2 / flex:1）
 - 按钮 + 链接交互测试
 - 深色页脚
 - 事件冒泡验证（点击任意子元素冒泡到父容器）
+- 控制台输出布局坐标和点击命中链
 
 ## 许可证
 
