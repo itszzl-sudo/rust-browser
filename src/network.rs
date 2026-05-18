@@ -302,6 +302,103 @@ impl NetworkClient {
         Ok(body_str)
     }
 
+    /// 同步 HTTP GET 请求，返回完整响应
+    pub fn get(&self, url: &str) -> Result<HttpResponse> {
+        debug!("[GET] {} (timeout: {}s)", url, self.timeout_secs);
+        
+        let parsed_url = Url::parse(url).map_err(|e| anyhow!("URL 解析失败: {}", e))?;
+        let client = create_blocking_client();
+        let mut req = client.get(url);
+        
+        if let Some(ref ua) = self.custom_ua {
+            req = req.header("User-Agent", ua);
+        }
+        
+        let cookie_header = self.get_cookies(&parsed_url);
+        if !cookie_header.is_empty() {
+            req = req.header("Cookie", cookie_header);
+        }
+        
+        if let Some(referer) = self.get_referer() {
+            req = req.header("Referer", referer);
+        }
+        
+        req = req
+            .header("Accept", "*/*")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Accept-Encoding", "gzip, deflate, br");
+        
+        let response = req.send().map_err(|e| anyhow!("网络请求失败: {}", e))?;
+        
+        let status = response.status().as_u16();
+        let final_url = response.url().to_string();
+        let headers: HashMap<String, String> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        
+        if let Some(set_cookie) = headers.get("set-cookie") {
+            self.parse_set_cookie(set_cookie, &parsed_url);
+        }
+        
+        let body = response.bytes().map_err(|e| anyhow!("读取响应体失败: {}", e))?;
+        
+        self.update_referer(url);
+        
+        Ok(HttpResponse {
+            status,
+            headers,
+            body: body.to_vec(),
+            final_url,
+        })
+    }
+
+    /// 同步 HTTP POST 请求
+    pub fn post(&self, url: &str, body: &[u8], content_type: &str) -> Result<HttpResponse> {
+        debug!("[POST] {} (timeout: {}s)", url, self.timeout_secs);
+        
+        let parsed_url = Url::parse(url).map_err(|e| anyhow!("URL 解析失败: {}", e))?;
+        let client = create_blocking_client();
+        let mut req = client.post(url).body(body.to_vec());
+        
+        if let Some(ref ua) = self.custom_ua {
+            req = req.header("User-Agent", ua);
+        }
+        
+        req = req.header("Content-Type", content_type);
+        
+        let cookie_header = self.get_cookies(&parsed_url);
+        if !cookie_header.is_empty() {
+            req = req.header("Cookie", cookie_header);
+        }
+        
+        if let Some(referer) = self.get_referer() {
+            req = req.header("Referer", referer);
+        }
+        
+        let response = req.send().map_err(|e| anyhow!("网络请求失败: {}", e))?;
+        
+        let status = response.status().as_u16();
+        let final_url = response.url().to_string();
+        let headers: HashMap<String, String> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        
+        let response_body = response.bytes().map_err(|e| anyhow!("读取响应体失败: {}", e))?;
+        
+        self.update_referer(url);
+        
+        Ok(HttpResponse {
+            status,
+            headers,
+            body: response_body.to_vec(),
+            final_url,
+        })
+    }
+
     pub fn clear_cookies(&self) {
         if let Ok(mut jar) = COOKIE_JAR.lock() {
             jar.clear();

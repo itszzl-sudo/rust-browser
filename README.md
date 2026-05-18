@@ -84,7 +84,7 @@ HTML → kuchiki DOM ─→ css_engine（selectors 完整选择器）
 | `boa` | ✅ | Boa JS 引擎（纯 Rust） |
 | `js` | | obscura-js（V8/deno_core） |
 | `gui` | ✅ | GUI 窗口（eframe/egui） |
-| `headless` | | 无 GUI/JS/首页加载，纯渲染核心（隐含 `boa`） |
+| `headless` | | 无 GUI/JS/首页加载，纯渲染核心（无 `boa`） |
 
 > `boa` 和 `js` 互斥，`headless` 不依赖任何 JS 引擎。
 
@@ -165,7 +165,7 @@ bridge.handle_click(100.0, 200.0);
 
 ```bash
 cargo test --lib bridge::tests --no-default-features --features headless
-
+```
 ## 依赖库
 
 | 库 | 版本 | 用途 |

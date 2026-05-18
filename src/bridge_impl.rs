@@ -323,6 +323,44 @@ impl WebNativeBridge for DefaultWebNativeBridge {
     fn viewport(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+
+    // ── 网络请求 ──
+
+    fn navigate(&mut self, url: &str) -> Result<(), String> {
+        use crate::network::NetworkClient;
+        
+        let client = NetworkClient::new();
+        let response = client.get(url)
+            .map_err(|e| format!("Network error: {}", e))?;
+        
+        // 更新 URL
+        self.url = response.final_url.clone();
+        
+        // 解析 HTML
+        let html = String::from_utf8_lossy(&response.body).to_string();
+        self.set_html(&html);
+        
+        Ok(())
+    }
+
+    fn current_url(&self) -> String {
+        self.url.clone()
+    }
+
+    fn http_get(&mut self, url: &str) -> Result<crate::network::HttpResponse, String> {
+        use crate::network::NetworkClient;
+        
+        let client = NetworkClient::new();
+        client.get(url).map_err(|e| format!("HTTP GET error: {}", e))
+    }
+
+    fn http_post(&mut self, url: &str, body: &[u8], content_type: &str) -> Result<crate::network::HttpResponse, String> {
+        use crate::network::NetworkClient;
+        
+        let client = NetworkClient::new();
+        client.post(url, body, content_type)
+            .map_err(|e| format!("HTTP POST error: {}", e))
+    }
 }
 
 impl DefaultWebNativeBridge {

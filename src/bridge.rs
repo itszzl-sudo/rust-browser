@@ -244,6 +244,20 @@ pub trait WebNativeBridge {
 
     /// 获取视口尺寸
     fn viewport(&self) -> (u32, u32);
+
+    // ── 网络请求 ──
+
+    /// 导航到 URL
+    fn navigate(&mut self, url: &str) -> Result<(), String>;
+
+    /// 获取当前 URL
+    fn current_url(&self) -> String;
+
+    /// 发送 HTTP GET 请求
+    fn http_get(&mut self, url: &str) -> Result<crate::network::HttpResponse, String>;
+
+    /// 发送 HTTP POST 请求
+    fn http_post(&mut self, url: &str, body: &[u8], content_type: &str) -> Result<crate::network::HttpResponse, String>;
 }
 
 // =========================================================================
