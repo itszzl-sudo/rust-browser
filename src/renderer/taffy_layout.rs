@@ -246,6 +246,38 @@ impl TaffyLayoutEngine {
                 }
             }
 
+            // 标签默认样式覆盖（用户内联样式优先级更高，但放在 merged_decls 中）
+            // 所以这些默认值在用户显式设置时会被覆盖
+            match tag_name.as_str() {
+                "a" => {
+                    // 默认蓝色
+                    if get_declaration(&merged_decls, "color").is_none() {
+                        merged_decls.push(Declaration {
+                            property: "color".into(),
+                            value: "#1a73e8".into(),
+                        });
+                    }
+                    if get_declaration(&merged_decls, "text-decoration").is_none() {
+                        merged_decls.push(Declaration {
+                            property: "text-decoration".into(),
+                            value: "underline".into(),
+                        });
+                    }
+                }
+                "strong" | "b" => {
+                    if get_declaration(&merged_decls, "font-weight").is_none() {
+                        merged_decls.push(Declaration {
+                            property: "font-weight".into(),
+                            value: "bold".into(),
+                        });
+                    }
+                }
+                "em" | "i" => {
+                    // cosmic-text font-style 暂不支持 italic，留待后续
+                }
+                _ => {}
+            }
+
             // 确定样式
             let style = self.determine_style(&tag_name, &merged_decls);
 
