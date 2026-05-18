@@ -1,23 +1,19 @@
-//! 网络模块 - 基于 obscura-net 增强版
+//! 网络模块 - 基于 reqwest 实现
 //!
 //! 封装 HTTP 请求和响应处理，支持：
 //! - 超时控制
 //! - Cookie 支持
 //! - Chrome User-Agent 模拟
 //! - gzip/brotli 自动解压
-//! - Referer/Origin 头
 
 use anyhow::{anyhow, Result};
-use brotli::Decompressor as BrotliDecompressor;
-use flate2::{read::GzDecoder, Decompress};
-use lazy_static::lazy_static;
 use log::{debug, info, trace, warn};
-use obscura_net::ObscuraHttpClient;
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::Mutex;
 use std::time::Duration;
 use url::Url;
+
+use lazy_static::lazy_static;
 
 lazy_static! {
     /// 全局 Cookie 存储
@@ -27,7 +23,18 @@ lazy_static! {
     static ref REFERER_STACK: Mutex<Vec<String>> = Mutex::new(Vec::new());
 }
 
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// 为当前线程创建一个 reqwest blocking client
+fn create_blocking_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .user_agent(CHROME_USER_AGENT)
+        .timeout(Duration::from_secs(30))
+        .danger_accept_invalid_certs(false)
+        .gzip(true)
+        .brotli(true)
+        .cookie_store(true)
+        .build()
+        .expect("Failed to create HTTP client")
+}
 
 const CHROME_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -37,7 +44,6 @@ struct CookieEntry {
     value: String,
     domain: String,
     path: String,
-    expires: Option<i64>,
     secure: bool,
 }
 
@@ -50,7 +56,6 @@ pub struct HttpResponse {
 }
 
 pub struct NetworkClient {
-    client: ObscuraHttpClient,
     timeout_secs: u64,
     enable_cookies: bool,
     custom_ua: Option<String>,
@@ -58,10 +63,9 @@ pub struct NetworkClient {
 
 impl NetworkClient {
     pub fn new() -> Self {
-        info!("初始化增强版 NetworkClient");
+        info!("初始化 NetworkClient (基于 reqwest)");
         Self {
-            client: ObscuraHttpClient::new(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            timeout_secs: 30,
             enable_cookies: true,
             custom_ua: Some(CHROME_USER_AGENT.to_string()),
         }
@@ -125,12 +129,14 @@ impl NetworkClient {
                 value: value.trim().to_string(),
                 domain,
                 path,
-                expires: None,
                 secure,
             };
 
             if let Ok(mut jar) = COOKIE_JAR.lock() {
-                jar.insert(format!("{}:{}", url.host_str().unwrap_or(""), name.trim()), entry);
+                jar.insert(
+                    format!("{}:{}", url.host_str().unwrap_or(""), name.trim()),
+                    entry,
+                );
             }
         }
     }
@@ -151,127 +157,149 @@ impl NetworkClient {
         None
     }
 
-    fn parse_response(&self, response: obscura_net::Response, url: &str) -> HttpResponse {
-        let mut headers = HashMap::new();
-        for (key, value) in &response.headers {
-            headers.insert(key.clone(), value.clone());
-        }
-
-        if let Some(set_cookie) = headers.get("set-cookie") {
-            if let Ok(parsed_url) = Url::parse(url) {
-                self.parse_set_cookie(set_cookie, &parsed_url);
-            }
-        }
-
-        HttpResponse {
-            status: response.status,
-            headers,
-            body: response.body,
-            final_url: url.to_string(),
-        }
-    }
-
-    fn decompress_body(&self, response: &mut HttpResponse) -> Result<()> {
-        if let Some(encoding) = response.headers.get("content-encoding").cloned() {
-            let encoding_lower = encoding.to_lowercase();
-
-            match encoding_lower.as_str() {
-                "gzip" => {
-                    trace!("解压 gzip 响应体");
-                    let mut decoder = GzDecoder::new(&response.body[..]);
-                    let mut decompressed = Vec::new();
-                    decoder.read_to_end(&mut decompressed)
-                        .map_err(|e| anyhow!("gzip 解压失败: {}", e))?;
-                    response.body = decompressed;
-                    response.headers.remove("content-encoding");
-                }
-                "br" => {
-                    trace!("解压 brotli 响应体");
-                    let mut decompressed = Vec::new();
-                    let mut decoder = BrotliDecompressor::new(&response.body[..], 4096);
-                    decoder.read_to_end(&mut decompressed)
-                        .map_err(|e| anyhow!("brotli 解压失败: {}", e))?;
-                    response.body = decompressed;
-                    response.headers.remove("content-encoding");
-                }
-                "deflate" => {
-                    trace!("解压 deflate 响应体");
-                    let mut decoder = Decompress::new(true);
-                    let mut decompressed = Vec::new();
-                    let result = decoder.decompress(&response.body, &mut decompressed, flate2::FlushDecompress::Finish);
-                    if result.is_ok() {
-                        response.body = decompressed;
-                    }
-                    response.headers.remove("content-encoding");
-                }
-                _ => {
-                    if !encoding.is_empty() && !encoding.eq("identity") {
-                        warn!("未知的 Content-Encoding: {}", encoding);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
+    /// 异步获取整个 HTTP 响应
     pub async fn fetch(&self, url: &str) -> Result<HttpResponse> {
         debug!("发送 GET 请求: {} (超时: {}s)", url, self.timeout_secs);
 
-        let parsed_url = Url::parse(url)
-            .map_err(|e| anyhow!("URL 解析失败: {}", e))?;
+        let parsed_url = Url::parse(url).map_err(|e| anyhow!("URL 解析失败: {}", e))?;
+
+        let client = reqwest::Client::builder()
+            .user_agent(
+                self.custom_ua
+                    .clone()
+                    .unwrap_or_else(|| CHROME_USER_AGENT.to_string()),
+            )
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .gzip(true)
+            .brotli(true)
+            .build()
+            .map_err(|e| anyhow!("创建 HTTP 客户端失败: {}", e))?;
+
+        let mut req = client.get(url);
 
         let cookie_header = self.get_cookies(&parsed_url);
         if !cookie_header.is_empty() {
-            trace!("发送 Cookie: {}", cookie_header);
+            req = req.header("Cookie", cookie_header);
         }
 
-        let response = self.client
-            .fetch(&parsed_url)
+        if let Some(referer) = self.get_referer() {
+            req = req.header("Referer", referer);
+        }
+
+        req = req
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Accept-Encoding", "gzip, deflate, br");
+
+        let response = req
+            .send()
             .await
             .map_err(|e| anyhow!("网络请求失败: {}", e))?;
 
-        let mut http_response = self.parse_response(response, url);
+        let status = response.status().as_u16();
+        let headers: HashMap<String, String> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
 
-        self.decompress_body(&mut http_response)?;
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| anyhow!("读取响应体失败: {}", e))?;
+
+        if let Some(set_cookie) = headers.get("set-cookie") {
+            self.parse_set_cookie(set_cookie, &parsed_url);
+        }
 
         self.update_referer(url);
 
-        trace!("收到响应，状态码: {}", http_response.status);
-
-        Ok(http_response)
-    }
-
-    pub async fn fetch_with_timeout(&self, url: &str, timeout_secs: u64) -> Result<HttpResponse> {
-        let client = self.clone();
-        let url = url.to_string();
-
-        tokio::time::timeout(Duration::from_secs(timeout_secs), async move {
-            client.fetch(&url).await
+        Ok(HttpResponse {
+            status,
+            headers,
+            body: body.to_vec(),
+            final_url: url.to_string(),
         })
-        .await
-        .map_err(|_| anyhow!("请求超时 ({}秒)", timeout_secs))?
     }
 
+    /// 异步获取 HTML 内容
     pub async fn fetch_html(&self, url: &str) -> Result<String> {
         let response = self.fetch(url).await?;
-
         if response.status != 200 && response.status != 304 {
             return Err(anyhow!("HTTP 状态码: {}", response.status));
         }
-
         let body = String::from_utf8_lossy(&response.body).into_owned();
         Ok(body)
     }
 
-    pub async fn fetch_html_with_timeout(&self, url: &str, timeout_secs: u64) -> Result<String> {
-        let response = self.fetch_with_timeout(url, timeout_secs).await?;
+    /// 同步获取 HTML 内容（用于渲染器线程）
+    pub fn fetch_html_blocking(&self, url: &str) -> Result<String> {
+        debug!(
+            "[blocking] 发送 GET 请求: {} (超时: {}s)",
+            url, self.timeout_secs
+        );
 
-        if response.status != 200 && response.status != 304 {
-            return Err(anyhow!("HTTP 状态码: {}", response.status));
+        let parsed_url = Url::parse(url).map_err(|e| anyhow!("URL 解析失败: {}", e))?;
+
+        let client = create_blocking_client();
+        let mut req = client.get(url);
+
+        // 添加自定义 UA
+        if let Some(ref ua) = self.custom_ua {
+            req = req.header("User-Agent", ua);
         }
 
-        let body = String::from_utf8_lossy(&response.body).into_owned();
-        Ok(body)
+        // 添加 Cookie
+        let cookie_header = self.get_cookies(&parsed_url);
+        if !cookie_header.is_empty() {
+            req = req.header("Cookie", cookie_header);
+        }
+
+        // 添加 Referer
+        if let Some(referer) = self.get_referer() {
+            req = req.header("Referer", referer);
+        }
+
+        // 添加标准浏览器请求头
+        req = req
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Accept-Encoding", "gzip, deflate, br")
+            .header("Connection", "keep-alive")
+            .header("Upgrade-Insecure-Requests", "1");
+
+        let response = req.send().map_err(|e| anyhow!("网络请求失败: {}", e))?;
+
+        let status = response.status().as_u16();
+        if status != 200 && status != 304 {
+            return Err(anyhow!("HTTP 状态码: {}", status));
+        }
+
+        // 先读 cookie header（在 response 被消费之前）
+        if self.enable_cookies {
+            if let Some(set_cookie_headers) = response.headers().get("set-cookie") {
+                if let Ok(cookie_str) = set_cookie_headers.to_str() {
+                    self.parse_set_cookie(cookie_str, &parsed_url);
+                }
+            }
+        }
+
+        let body = response
+            .bytes()
+            .map_err(|e| anyhow!("读取响应体失败: {}", e))?;
+
+        let body_str = String::from_utf8_lossy(&body).into_owned();
+
+        self.update_referer(url);
+        trace!("收到响应，状态码: {}", status);
+
+        Ok(body_str)
     }
 
     pub fn clear_cookies(&self) {
@@ -292,7 +320,6 @@ impl NetworkClient {
 impl Clone for NetworkClient {
     fn clone(&self) -> Self {
         Self {
-            client: ObscuraHttpClient::new(),
             timeout_secs: self.timeout_secs,
             enable_cookies: self.enable_cookies,
             custom_ua: self.custom_ua.clone(),

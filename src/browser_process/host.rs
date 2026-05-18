@@ -302,20 +302,46 @@ fn run_renderer_process(
     let mut current_url = initial_url.clone();
     let mut running = true;
 
-    // 首次导航（如果 URL 不是空白页）
-    if !current_url.is_empty() && current_url != "about:blank" {
+    // 首次导航
+    if !current_url.is_empty() {
         info!("Renderer #{} 首次导航到: {}", id, current_url);
-        if let Ok(doc) = load_document(&current_url) {
-            let title = doc.title.clone();
-            let doc_opt = Some(doc);
-            if let Ok(png) = renderer.render(&doc_opt) {
-                let result = RenderResultMessage {
-                    png_data: png,
-                    width,
-                    height,
-                    title,
-                };
-                let _ = result_proxy.send_message(result.to_message());
+        match load_document(&current_url) {
+            Ok(doc) => {
+                let title = doc.title.clone();
+                let doc_opt = Some(doc);
+                match renderer.render(&doc_opt) {
+                    Ok(png) => {
+                        let result = RenderResultMessage {
+                            png_data: png,
+                            width,
+                            height,
+                            title,
+                        };
+                        let _ = result_proxy.send_message(result.to_message());
+                        info!("Renderer #{} 首次渲染完成", id);
+                    }
+                    Err(e) => {
+                        warn!("Renderer #{} 首次渲染失败: {:?}", id, e);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Renderer #{} 首次加载文档失败: {}", id, e);
+                // 即使加载失败，也发送一个空白页面的渲染结果，让浏览器有内容显示
+                match renderer.render(&None) {
+                    Ok(png) => {
+                        let result = RenderResultMessage {
+                            png_data: png,
+                            width,
+                            height,
+                            title: Some(format!("加载失败: {}", e)),
+                        };
+                        let _ = result_proxy.send_message(result.to_message());
+                    }
+                    Err(e2) => {
+                        warn!("Renderer #{} 空白页渲染也失败: {:?}", id, e2);
+                    }
+                }
             }
         }
     }
@@ -601,10 +627,9 @@ fn load_document(url: &str) -> Result<Document, String> {
             Ok(Document::from_html(&html, url))
         }
     } else {
-        // 网络请求（使用现有网络客户端 + tokio runtime）
-        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("创建运行时失败: {}", e))?;
-        let html = rt
-            .block_on(crate::network::NetworkClient::new().fetch_html(url))
+        // 网络请求（同步，使用 reqwest blocking client）
+        let html = crate::network::NetworkClient::new()
+            .fetch_html_blocking(url)
             .map_err(|e| format!("网络请求失败: {}", e))?;
         Ok(Document::from_html(&html, url))
     }

@@ -21,7 +21,7 @@ tiny-skia = { path = "../tiny-skia-0.12.0" }
 # cosmic-text 0.19.0 本地源码
 cosmic-text = { path = "../cosmic-text-0.19.0" }
 
-reqwest = { version = "0.12", features = ["gzip", "brotli"] }
+reqwest = { version = "0.12", features = ["gzip", "brotli", "blocking"] }
 
 # kuchiki 0.12.0 本地源码
 kuchiki = { path = "../kuchikikiki-0.12.0", package = "kuchikikiki" }
@@ -61,12 +61,21 @@ regex = "1.11"
 image = { version = "0.25.1", features = ["png", "jpeg", "gif", "webp", "bmp"] }
 brotli = "7.0"
 flate2 = "1.0"
+serde_json = "1.0"
 
 [features]
 default = ["boa", "gui"]
+
+# JS 引擎后端
 js = ["obscura-js"]
 boa = ["boa_engine", "boa_gc"]
+
+# GUI 窗口模式
 gui = ["eframe", "egui"]
+
+# 无头模式：禁用首页加载、GUI、菜单栏、JS 引擎，只保留渲染核心 + bridge
+# 适合服务器端渲染和自动化测试
+headless = []
 
 [profile.release]
 opt-level = 3

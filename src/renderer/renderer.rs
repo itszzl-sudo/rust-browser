@@ -310,6 +310,32 @@ impl Renderer {
         taffy: &TaffyLayoutEngine,
     ) -> Result<Vec<u8>, RenderError> {
         self.is_loading = true;
+
+        // 计算页面总高度（长页面截图）
+        let (width, height) = self.context.viewport();
+        let page_height = if !taffy.is_empty() {
+            let max_bottom = taffy
+                .get_all_layout_nodes()
+                .iter()
+                .map(|n| n.y + n.height)
+                .fold(0.0_f32, f32::max)
+                .max(height as f32);
+            (max_bottom + 50.0) as u32
+        } else {
+            height
+        };
+
+        let is_tall = page_height > height;
+        let orig_pixmap = self.painter.pixmap_mut().clone();
+
+        // 如果页面超过视口，创建完整页面大小的画布
+        if is_tall {
+            if let Some(page_pixmap) = Pixmap::new(width, page_height) {
+                *self.painter.pixmap_mut() = page_pixmap;
+                debug!("超长截图: {}x{}", width, page_height);
+            }
+        }
+
         self.painter.set_background(Color::WHITE);
         self.painter.paint();
 
@@ -322,8 +348,18 @@ impl Renderer {
             renderer.render_dom();
         }
 
+        // 长页面：保留完整 PNG，恢复原始画布
+        let result = if is_tall {
+            let full_png = self.painter.to_png();
+            self.page_png = Some(full_png.clone());
+            *self.painter.pixmap_mut() = orig_pixmap;
+            full_png
+        } else {
+            self.painter.to_png()
+        };
+
         self.is_loading = false;
-        Ok(self.painter.to_png())
+        Ok(result)
     }
 
     fn render_blank_page(&mut self) -> Result<(), RenderError> {
@@ -591,8 +627,10 @@ impl<'a> TaffyRenderer<'a> {
         }
 
         // 使用 Taffy 布局结果遍历渲染
-        if let Some(root_ref) = self.dom.inner_document().descendants().next() {
-            self.render_tree_with_taffy(&root_ref);
+        let doc = self.dom.inner_document();
+        // 从 document 的子节点开始遍历（跳过 Document 节点本身）
+        for child in doc.children() {
+            self.render_tree_with_taffy(&child);
         }
     }
 
@@ -732,7 +770,8 @@ impl<'a> TaffyRenderer<'a> {
             let tag_name = element.name.local.to_string();
 
             // 找到对应的 dom 索引
-            if let Some(dom_idx) = self.find_dom_index(node_ref) {
+            let dom_idx_opt = self.find_dom_index(node_ref);
+            if let Some(dom_idx) = dom_idx_opt {
                 // 通过 dom 索引获取 taffy 布局
                 if let Some(layout) = self.taffy.get_layout(dom_idx) {
                     let x = layout.x;
@@ -768,21 +807,23 @@ impl<'a> TaffyRenderer<'a> {
                         self.render_img_element(x, y, w, h, node_ref);
                     }
 
-                    // 渲染元素的直接文本内容
-                    let text_content = collect_text(node_ref);
-                    if !text_content.trim().is_empty() {
-                        let font_size = layout.font_size.max(12.0);
-                        let default_color = Color::from_hex("#333333");
-                        let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
-                        let padding = 10.0;
-                        self.render_text_at(
-                            &text_content,
-                            x + padding,
-                            y + padding,
-                            w - padding * 2.0,
-                            font_size,
-                            font_color,
-                        );
+                    // 渲染元素的直接文本内容（跳过 style/script 等不可见标签）
+                    if tag_name != "style" && tag_name != "script" && tag_name != "head" {
+                        let text_content = collect_text(node_ref);
+                        if !text_content.trim().is_empty() {
+                            let font_size = layout.font_size.max(12.0);
+                            let default_color = Color::from_hex("#333333");
+                            let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
+                            let padding = 10.0;
+                            self.render_text_at(
+                                &text_content,
+                                x + padding,
+                                y + padding,
+                                w - padding * 2.0,
+                                font_size,
+                                font_color,
+                            );
+                        }
                     }
                 }
             }
@@ -798,9 +839,12 @@ impl<'a> TaffyRenderer<'a> {
                     let tag_name = element.name.local.to_string();
                     if let Some(dom_idx) = self.find_dom_index(&parent) {
                         if let Some(layout) = self.taffy.get_layout(dom_idx) {
-                            // 检查是否已经渲染过文本（由父元素渲染）
-                            // 如果是 img 等不需要额外文本渲染
-                            if tag_name != "img" {
+                            // 跳过 style/script/head 等不可见标签内的文本
+                            if tag_name != "img"
+                                && tag_name != "style"
+                                && tag_name != "script"
+                                && tag_name != "head"
+                            {
                                 let text_content = collect_text(&parent);
                                 if !text_content.trim().is_empty() {
                                     // 已经在父元素渲染过了，跳过
@@ -839,7 +883,6 @@ impl<'a> TaffyRenderer<'a> {
     /// 通过 NodeRef 的 Rc 指针查找 DOM 索引
     fn find_dom_index(&self, node_ref: &NodeRef) -> Option<usize> {
         let rc_ptr = Rc::as_ptr(&node_ref.0) as usize;
-        // 使用 DomWrapper 的 descendants 定位
         self.dom
             .inner_document()
             .descendants()

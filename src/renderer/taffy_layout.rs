@@ -815,14 +815,31 @@ impl TaffyLayoutEngine {
                 .compute_layout(root, self.viewport)
                 .map_err(|e| format!("布局计算失败: {}", e))?;
 
-            // 提取坐标到 layout_nodes
+            // 提取坐标到 layout_nodes，并转换为绝对坐标
+            // taffy 的 layout() 返回的是相对父节点的偏移，
+            // 需要手动累加父节点坐标得到屏幕绝对坐标
             for layout_node in self.layout_nodes.iter_mut() {
                 let layout = self
                     .taffy
                     .layout(layout_node.node)
                     .map_err(|e| format!("获取节点布局失败: {}", e))?;
-                layout_node.x = layout.location.x;
-                layout_node.y = layout.location.y;
+
+                // 先设置为相对坐标
+                let mut abs_x = layout.location.x;
+                let mut abs_y = layout.location.y;
+
+                // 向上遍历父节点，累加坐标
+                let mut current = layout_node.node;
+                while let Some(parent) = self.taffy.parent(current) {
+                    if let Ok(parent_layout) = self.taffy.layout(parent) {
+                        abs_x += parent_layout.location.x;
+                        abs_y += parent_layout.location.y;
+                    }
+                    current = parent;
+                }
+
+                layout_node.x = abs_x;
+                layout_node.y = abs_y;
                 layout_node.width = layout.size.width;
                 layout_node.height = layout.size.height;
             }

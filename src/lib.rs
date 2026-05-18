@@ -35,24 +35,13 @@ pub mod js_engine;
 pub mod mojo;
 pub mod network;
 pub mod renderer;
-pub mod renderer_process;
-pub mod storage;
 pub mod task_queue;
 
-pub mod html;
-pub mod loader;
-
 pub mod bridge;
-
-#[allow(deprecated)]
-pub mod dom;
 
 pub use browser::{Browser, BrowserEngine, BrowserError, Document, DEFAULT_HOME_URL};
 pub use browser::{Tab, TabManager};
 pub use css::values::Color;
-#[allow(deprecated)]
-pub use dom::node::DomTree;
 pub use dom_wrapper::DomWrapper;
-pub use html::parser::HtmlParser;
 pub use network::NetworkClient;
 pub use renderer::Renderer;

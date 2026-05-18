@@ -37,7 +37,7 @@ use crate::renderer::taffy_layout::{TaffyLayoutEngine, TaffyLayoutNode};
 use crate::renderer::Renderer;
 use std::collections::HashMap;
 
-#[cfg(feature = "js")]
+#[cfg(any(feature = "js", feature = "boa"))]
 use crate::js_engine::JsEngine;
 
 /// 事件处理器：Rust 闭包，接收点击位置的 (x, y)
@@ -72,7 +72,7 @@ pub struct WebNativeBridge {
     /// 表单提交：CSS 选择器 → 处理器
     form_handlers: HashMap<String, FormHandler>,
 
-    #[cfg(feature = "js")]
+    #[cfg(any(feature = "js", feature = "boa"))]
     js_engine: JsEngine,
 }
 
@@ -97,7 +97,7 @@ impl WebNativeBridge {
             inline_styles: String::new(),
             click_handlers: HashMap::new(),
             form_handlers: HashMap::new(),
-            #[cfg(feature = "js")]
+            #[cfg(any(feature = "js", feature = "boa"))]
             js_engine: JsEngine::new(),
         }
     }
@@ -111,7 +111,7 @@ impl WebNativeBridge {
         self.html = html.to_string();
         self.dom = DomWrapper::from_html(html, Some(&self.url));
 
-        #[cfg(feature = "js")]
+        #[cfg(any(feature = "js", feature = "boa"))]
         {
             let _ = self.js_engine.initialize(&self.url);
             self.js_engine.set_url(&self.url);
@@ -234,9 +234,10 @@ impl WebNativeBridge {
 
     /// 执行 JavaScript 代码
     ///
-    /// 需要 `--features js` 编译。不带 feature 时返回 `"undefined"`.
+    /// 需要 `--features boa` 或 `--features js` 编译。
+    /// 不带 JS feature 时返回 `"undefined"`.
     pub fn eval_js(&mut self, code: &str) -> String {
-        #[cfg(feature = "js")]
+        #[cfg(any(feature = "js", feature = "boa"))]
         {
             if !self.js_engine.is_ready() {
                 let _ = self.js_engine.initialize(&self.url);
@@ -245,7 +246,7 @@ impl WebNativeBridge {
                 .evaluate(code)
                 .unwrap_or_else(|e| format!("JS Error: {}", e))
         }
-        #[cfg(not(feature = "js"))]
+        #[cfg(not(any(feature = "js", feature = "boa")))]
         {
             let _ = code;
             "undefined".to_string()
@@ -328,28 +329,47 @@ impl WebNativeBridge {
     /// 处理鼠标点击（由你的原生窗口调用）
     ///
     /// 按命中测试触发已注册的事件处理器。
+    /// 从命中的节点开始向上遍历 DOM 树（冒泡），
+    /// 依次检查每个祖先节点是否匹配已注册的选择器。
     /// 返回 `true` 表示事件被消费。
     pub fn handle_click(&mut self, x: f32, y: f32) -> bool {
         // 点击测试
-        if let Some(node) = self.layout.hit_test(x, y) {
-            // 检查已注册的点击处理器
-            for (selector, handler) in self.click_handlers.iter_mut() {
-                if self
-                    .dom
-                    .select_first(selector)
-                    .map(|id| id == node.dom_node)
-                    .unwrap_or(false)
-                {
+        let hit_node = match self.layout.hit_test(x, y) {
+            Some(node) => node.dom_node,
+            None => return false,
+        };
+
+        // 向上遍历 DOM 祖先链（从命中节点开始，包括自身）
+        fn collect_ancestors(dom: &DomWrapper, start: usize) -> Vec<usize> {
+            let mut chain = Vec::new();
+            let mut current = Some(start);
+            while let Some(id) = current {
+                chain.push(id);
+                current = dom.parent(id);
+            }
+            chain
+        }
+        let ancestor_chain = collect_ancestors(&self.dom, hit_node);
+
+        // 按注册顺序检查（先注册的优先级更高）
+        for (selector, handler) in self.click_handlers.iter_mut() {
+            if let Some(sel_id) = self.dom.select_first(selector) {
+                // 检查命中节点或其祖先是否匹配
+                // 注意：从最内层开始匹配（冒泡），所以优先匹配最近祖先
+                if ancestor_chain.contains(&sel_id) {
                     handler(x, y);
                     return true;
                 }
             }
+        }
 
-            // 如果是 <a> 标签，返回 false 让调用方处理导航
+        // 如果是 <a> 标签，返回 false 让调用方处理导航
+        if let Some(node) = self.layout.hit_test(x, y) {
             if node.tag_name == "a" {
                 return false;
             }
         }
+
         false
     }
 

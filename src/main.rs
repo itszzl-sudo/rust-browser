@@ -37,7 +37,7 @@ fn get_log_messages() -> Vec<String> {
 }
 
 const DEFAULT_URL: &str = "https://www.baidu.com";
-const LOAD_TIMEOUT_SECS: u64 = 5;
+const LOAD_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -134,18 +134,25 @@ impl BrowserApp {
         if let Some(ref mut host) = self.browser_host {
             // 从 Mojo IPC 管道接收渲染结果
             if let Some(result) = host.try_receive_result() {
-                add_log_message(format!("收到渲染帧: {}x{}", result.width, result.height));
+                add_log_message(format!(
+                    "收到渲染帧: {}x{} ({} bytes)",
+                    result.width,
+                    result.height,
+                    result.png_data.len()
+                ));
 
                 match image::load_from_memory(&result.png_data) {
                     Ok(img) => {
                         let rgba = img.to_rgba8();
                         let (w, h) = rgba.dimensions();
+                        add_log_message(format!("图片解码成功: {}x{}", w, h));
                         let pixels: Vec<u8> = rgba.into_raw();
                         self.image_data = Some(egui::ColorImage::from_rgba_unmultiplied(
                             [w as usize, h as usize],
                             &pixels,
                         ));
                         self.error_message = None;
+                        self.is_loading = false;
                         if let Some(ref title) = result.title {
                             add_log_message(format!("页面标题: {}", title));
                         }
@@ -171,52 +178,6 @@ impl BrowserApp {
                 Ok(_) => {
                     self.url_input = url.to_string();
                     add_log_message("导航消息已通过 IPC 发送到渲染器".to_string());
-
-                    // 通过 TaskQueue 延迟等待渲染结果
-                    let scheduler = &*GLOBAL_SCHEDULER;
-                    let poll_interval = std::time::Duration::from_millis(100);
-                    let start = Instant::now();
-
-                    // 轮询等待渲染结果（最多 10 秒）
-                    while start.elapsed().as_secs() < LOAD_TIMEOUT_SECS {
-                        // 在浏览器进程中运行 main thread 任务
-                        scheduler.run_main_tasks();
-
-                        // 使用 host 的可变引用接收结果
-                        // （通过内部可变性处理）
-                        if let Some(ref mut host) = self.browser_host {
-                            if let Some(result) = host.try_receive_result() {
-                                add_log_message("通过 IPC 接收到渲染结果".to_string());
-                                match image::load_from_memory(&result.png_data) {
-                                    Ok(img) => {
-                                        let rgba = img.to_rgba8();
-                                        let (w, h) = rgba.dimensions();
-                                        let pixels: Vec<u8> = rgba.into_raw();
-                                        self.image_data =
-                                            Some(egui::ColorImage::from_rgba_unmultiplied(
-                                                [w as usize, h as usize],
-                                                &pixels,
-                                            ));
-                                        self.error_message = None;
-                                        if let Some(ref title) = result.title {
-                                            add_log_message(format!("页面标题: {}", title));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.error_message = Some(format!("图像解析失败: {}", e));
-                                    }
-                                }
-                                self.is_loading = false;
-                                return;
-                            }
-                        }
-
-                        std::thread::sleep(poll_interval);
-                    }
-
-                    add_log_message("导航超时：渲染器未返回结果".to_string());
-                    self.error_message = Some("页面加载超时".to_string());
-                    self.is_loading = false;
                 }
                 Err(e) => {
                     let err = format!("导航 IPC 发送失败: {}", e);
@@ -233,34 +194,21 @@ impl BrowserApp {
 }
 
 impl eframe::App for BrowserApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 首帧初始化
+    fn ui(&mut self, ctx: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // 首帧初始化 - 等待渲染器自动加载结果
         if self.first_frame {
             self.first_frame = false;
-            add_log_message("窗口已显示".to_string());
-            add_log_message(format!(
-                "将在 {} 秒后自动加载: {}",
-                LOAD_TIMEOUT_SECS, self.initial_url
-            ));
-            self.load_start_time = Some(Instant::now());
+            add_log_message("窗口已显示，等待渲染器加载首页...".to_string());
             info!("首帧渲染完成，窗口已显示");
 
-            // 立即尝试接收首次渲染结果
-            self.refresh_from_renderer();
+            // 渲染器进程启动时已自动开始加载 initial_url
+            // 这里只需要开始计时等待结果
+            self.is_loading = true;
+            self.load_start_time = Some(Instant::now());
         }
 
-        // 自动加载
-        if self.auto_load_pending {
-            if let Some(start_time) = self.load_start_time {
-                let elapsed = start_time.elapsed().as_secs();
-                if elapsed >= LOAD_TIMEOUT_SECS {
-                    add_log_message("自动加载触发...".to_string());
-                    self.auto_load_pending = false;
-                    let url_to_load = self.initial_url.clone();
-                    self.navigate(&url_to_load);
-                }
-            }
-        }
+        // 每帧尝试接收渲染结果
+        self.refresh_from_renderer();
 
         // 加载超时处理
         if self.is_loading {
@@ -272,9 +220,6 @@ impl eframe::App for BrowserApp {
                     self.error_message = Some("网络连接超时，请检查网络后重试".to_string());
                 }
             }
-
-            // 加载中仍然尝试接收渲染结果
-            self.refresh_from_renderer();
         }
 
         // 处理键盘事件
@@ -288,31 +233,9 @@ impl eframe::App for BrowserApp {
                 } = event
                 {
                     // 只在 Ctrl 未按下时处理（避免冲突）
-                    if !modifiers.ctrl && !modifiers.meta {
+                    if !modifiers.ctrl && !modifiers.mac_cmd {
                         let key_str = match key {
-                            egui::Key::Backspace => "Backspace".to_string(),
-                            egui::Key::Enter => "Enter".to_string(),
-                            egui::Key::Tab => "Tab".to_string(),
-                            egui::Key::Space => " ".to_string(),
-                            egui::Key::ArrowLeft => "ArrowLeft".to_string(),
-                            egui::Key::ArrowRight => "ArrowRight".to_string(),
-                            egui::Key::ArrowUp => "ArrowUp".to_string(),
-                            egui::Key::ArrowDown => "ArrowDown".to_string(),
-                            egui::Key::Escape => "Escape".to_string(),
-                            egui::Key::Delete => "Delete".to_string(),
-                            // 其他按键映射到字符
-                            _ => {
-                                if let Some(c) = key.to_char() {
-                                    // 如果 Shift 按下，尝试大写；否则小写
-                                    if modifiers.shift {
-                                        c.to_uppercase().to_string()
-                                    } else {
-                                        c.to_lowercase().to_string()
-                                    }
-                                } else {
-                                    return; // 跳过无法映射的键
-                                }
-                            }
+                            _ => key.name().to_string(),
                         };
 
                         if let Some(ref host) = self.browser_host {
@@ -334,13 +257,14 @@ impl eframe::App for BrowserApp {
         ctx.set_visuals(egui::Visuals::dark());
 
         // 顶部标签页栏 + URL 输入
-        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // 显示所有标签页
-                if let Some(ref host) = self.browser_host {
-                    let renderer_ids = host.renderer_ids();
-                    for &tab_id in &renderer_ids {
-                        let is_active = Some(tab_id) == self.active_renderer_id;
+        {
+            // 预先收集标签页数据，避免在闭包中同时借用 self
+            let tabs_data: Vec<(u64, String, bool)> = if let Some(ref host) = self.browser_host {
+                let active_id = self.active_renderer_id;
+                host.renderer_ids()
+                    .iter()
+                    .map(|&tab_id| {
+                        let is_active = Some(tab_id) == active_id;
                         let label = if let Some(renderer) = host.get_renderer(tab_id) {
                             if let Some(ref title) = renderer.title {
                                 format!("{}", title)
@@ -359,32 +283,47 @@ impl eframe::App for BrowserApp {
                         } else {
                             format!("标签 #{}", tab_id)
                         };
+                        (tab_id, label, is_active)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-                        let btn = if is_active {
-                            ui.selectable_label(true, &label)
+            let renderer_count = self
+                .browser_host
+                .as_ref()
+                .map(|h| h.renderer_ids().len())
+                .unwrap_or(0);
+
+            egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for (tab_id, label, is_active) in &tabs_data {
+                        let btn = if *is_active {
+                            ui.selectable_label(true, label)
                         } else {
-                            ui.selectable_label(false, &label)
+                            ui.selectable_label(false, label)
                         };
 
                         if btn.clicked() && !is_active {
                             add_log_message(format!("切换到标签页 #{}", tab_id));
                             if let Some(ref mut host) = self.browser_host {
-                                host.switch_to_tab(tab_id);
-                                self.active_renderer_id = Some(tab_id);
+                                host.switch_to_tab(*tab_id);
+                                self.active_renderer_id = Some(*tab_id);
                                 self.refresh_from_renderer();
                             }
                         }
 
                         // 关闭标签页按钮（保留至少一个）
-                        if renderer_ids.len() > 1 {
+                        if renderer_count > 1 {
                             if ui.button("✕").clicked() {
                                 add_log_message(format!("关闭标签页 #{}", tab_id));
                                 if let Some(ref mut host) = self.browser_host {
-                                    host.close_renderer(tab_id);
+                                    host.close_renderer(*tab_id);
                                     self.active_renderer_id = host.active_renderer().map(|r| r.id);
                                     self.refresh_from_renderer();
                                 }
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     }
@@ -405,9 +344,9 @@ impl eframe::App for BrowserApp {
                             }
                         }
                     }
-                }
+                });
             });
-        });
+        }
 
         // 加载进度条（显示在导航栏下方）
         if self.is_loading {
@@ -430,11 +369,12 @@ impl eframe::App for BrowserApp {
                     // 从蓝到白的渐变
                     let blue = egui::Color32::from_rgb(0x4A, 0x90, 0xD9);
                     let light = egui::Color32::from_rgb(0xAA, 0xCC, 0xEE);
-                    let current_color = egui::lerp(&blue, &light, progress);
+                    let current_color = blue.lerp_to_gamma(light, progress);
 
                     // 绘制动画条（从左到右滚动）
                     let bar_width = available_width * 0.3;
-                    let offset = ((time * 60.0) % (available_width + bar_width)) - bar_width;
+                    let offset =
+                        (((time * 60.0) as f32) % (available_width + bar_width)) - bar_width;
                     let indicator_rect = egui::Rect::from_min_size(
                         egui::pos2(offset, ui.cursor().min.y),
                         egui::vec2(bar_width, 4.0),
@@ -499,7 +439,7 @@ impl eframe::App for BrowserApp {
                     }
 
                     // 显示图像
-                    ui.put_image(rect, &texture);
+                    ui.put(rect, egui::Image::new(&texture));
                 });
             } else if self.auto_load_pending || self.is_loading {
                 ui.centered_and_justified(|ui| {

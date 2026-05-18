@@ -18,12 +18,21 @@ use log::{info, warn};
 
 #[cfg(feature = "boa")]
 mod backend {
-    use boa_engine::{Context, Source};
-    use log::info;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use boa_engine::native_function::NativeFunction;
+    use boa_engine::property::Attribute;
+    use boa_engine::JsString;
+    use boa_engine::{Context, JsArgs, JsError, JsNativeError, JsResult, JsValue, Source};
+    use log::{error, info, warn};
+
+    use crate::network::NetworkClient;
 
     pub struct BoaJsEngine {
         context: Option<Context>,
         url: String,
+        network: Rc<RefCell<NetworkClient>>,
     }
 
     impl BoaJsEngine {
@@ -32,6 +41,7 @@ mod backend {
             Self {
                 context: None,
                 url: "about:blank".to_string(),
+                network: Rc::new(RefCell::new(NetworkClient::new())),
             }
         }
 
@@ -44,8 +54,8 @@ mod backend {
 
             let mut context = Context::default();
 
-            // 注入基础的 console 对象
-            let console_js = r#"
+            // 注入基础的 console 和 polyfill 对象
+            let polyfill_js = r#"
                 globalThis.console = {
                     log: (...args) => {},
                     warn: (...args) => {},
@@ -64,19 +74,14 @@ mod backend {
 
                 // 简化的 document 对象
                 globalThis.document = {
-                    title: '',
-                    URL: '',
+                    title: '', URL: '',
                     createElement: (tag) => ({ tagName: tag, style: {}, setAttribute: () => {}, getAttribute: () => null, appendChild: () => {}, textContent: '' }),
                     createTextNode: (text) => ({ nodeType: 3, textContent: text, data: text }),
-                    getElementById: () => null,
-                    querySelector: () => null,
-                    querySelectorAll: () => [],
+                    getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
                     body: { appendChild: () => {}, style: {} },
                     head: { appendChild: () => {} },
                     documentElement: { style: {} },
-                    addEventListener: () => {},
-                    removeEventListener: () => {},
-                    dispatchEvent: () => true,
+                    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => true,
                 };
                 globalThis.window = globalThis;
                 globalThis.self = globalThis;
@@ -87,42 +92,183 @@ mod backend {
                 globalThis.CustomEvent = class CustomEvent extends Event { constructor(type, detail) { super(type); this.detail = detail?.detail; } };
                 globalThis.MouseEvent = class MouseEvent extends Event { constructor(type, init) { super(type); this.clientX = init?.clientX || 0; this.clientY = init?.clientY || 0; } };
                 globalThis.KeyboardEvent = class KeyboardEvent extends Event { constructor(type, init) { super(type); this.key = init?.key || ''; this.code = init?.code || ''; } };
-                globalThis.JSON = JSON;
-                globalThis.Math = Math;
-                globalThis.parseInt = parseInt;
-                globalThis.parseFloat = parseFloat;
-                globalThis.isNaN = isNaN;
-                globalThis.isFinite = isFinite;
-                globalThis.encodeURI = encodeURI;
-                globalThis.decodeURI = decodeURI;
-                globalThis.encodeURIComponent = encodeURIComponent;
-                globalThis.decodeURIComponent = decodeURIComponent;
-                globalThis.Array = Array;
-                globalThis.Object = Object;
-                globalThis.String = String;
-                globalThis.Number = Number;
-                globalThis.Boolean = Boolean;
-                globalThis.Function = Function;
-                globalThis.Date = Date;
-                globalThis.RegExp = RegExp;
-                globalThis.Error = Error;
-                globalThis.TypeError = TypeError;
-                globalThis.ReferenceError = ReferenceError;
+                globalThis.JSON = JSON; globalThis.Math = Math;
+                globalThis.parseInt = parseInt; globalThis.parseFloat = parseFloat;
+                globalThis.isNaN = isNaN; globalThis.isFinite = isFinite;
+                globalThis.encodeURI = encodeURI; globalThis.decodeURI = decodeURI;
+                globalThis.encodeURIComponent = encodeURIComponent; globalThis.decodeURIComponent = decodeURIComponent;
+                globalThis.Array = Array; globalThis.Object = Object; globalThis.String = String;
+                globalThis.Number = Number; globalThis.Boolean = Boolean; globalThis.Function = Function;
+                globalThis.Date = Date; globalThis.RegExp = RegExp;
+                globalThis.Error = Error; globalThis.TypeError = TypeError; globalThis.ReferenceError = ReferenceError;
                 globalThis.SyntaxError = SyntaxError;
-                globalThis.Promise = Promise;
-                globalThis.Map = Map;
-                globalThis.Set = Set;
-                globalThis.Symbol = Symbol;
+                globalThis.Promise = Promise; globalThis.Map = Map; globalThis.Set = Set; globalThis.Symbol = Symbol;
             "#;
 
-            match context.eval(Source::from_bytes(&console_js)) {
-                Ok(_) => info!("Boa 运行时初始化完成"),
-                Err(e) => log::warn!("Boa 运行时初始化警告: {}", e),
+            match context.eval(Source::from_bytes(&polyfill_js)) {
+                Ok(_) => info!("Boa 运行时 polyfill 注入完成"),
+                Err(e) => warn!("Boa polyfill 注入警告: {}", e),
             }
+
+            // 注册 fetch 原生函数
+            self.register_fetch(&mut context);
 
             self.context = Some(context);
             info!("JS 引擎已就绪 (Boa)");
             Ok(())
+        }
+
+        /// 注册全局 fetch() 原生函数
+        fn register_fetch(&self, context: &mut Context) {
+            // 使用 from_fn_ptr 创建 fetch 函数
+            // 函数内部用 tokio block_on 执行 HTTP 请求，然后返回 Promise
+            fn fetch_impl(
+                _this: &JsValue,
+                args: &[JsValue],
+                context: &mut Context,
+            ) -> JsResult<JsValue> {
+                let url_val = args.get_or_undefined(0).clone();
+                let opts_val = args.get_or_undefined(1).clone();
+
+                // 获取 URL 字符串
+                let url_str = url_val
+                    .to_string(context)
+                    .map_err(|e| JsError::from_opaque(JsString::from(e.to_string()).into()))?
+                    .to_std_string()
+                    .map_err(|e| JsError::from_opaque(JsString::from(e.to_string()).into()))?;
+
+                // 获取 method
+                let _method = if opts_val.is_undefined() {
+                    "GET".to_string()
+                } else {
+                    let obj = opts_val.as_object().ok_or_else(|| {
+                        JsError::from_opaque(
+                            JsString::from("fetch: options must be an object").into(),
+                        )
+                    })?;
+                    let method_val = obj
+                        .get(JsString::from("method"), context)
+                        .map_err(|e| JsError::from_opaque(JsString::from(e.to_string()).into()))?;
+                    if method_val.is_undefined() {
+                        "GET".to_string()
+                    } else {
+                        method_val
+                            .to_string(context)
+                            .map_err(|e| {
+                                JsError::from_opaque(JsString::from(e.to_string()).into())
+                            })?
+                            .to_std_string()
+                            .map_err(|e| {
+                                JsError::from_opaque(JsString::from(e.to_string()).into())
+                            })?
+                            .to_uppercase()
+                    }
+                };
+
+                // 使用 tokio runtime 执行异步 HTTP 请求（同步阻塞）
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| JsError::from_opaque(JsString::from(e.to_string()).into()))?;
+
+                let (status, status_text, headers_vec, body_text) = rt
+                    .block_on(async {
+                        let client = reqwest::Client::builder()
+                            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+                            .timeout(std::time::Duration::from_secs(15))
+                            .danger_accept_invalid_certs(false)
+                            .gzip(true)
+                            .brotli(true)
+                            .build()
+                            .map_err(|e| JsError::from_opaque(JsString::from(e.to_string()).into()))?;
+
+                        let resp = client.get(&url_str).send().await
+                            .map_err(|e| JsError::from_opaque(JsString::from(e.to_string()).into()))?;
+
+                        let status = resp.status().as_u16();
+                        let status_text = resp.status().canonical_reason().unwrap_or("").to_string();
+                        let headers_vec: Vec<(String, String)> = resp
+                            .headers()
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                            .collect();
+
+                        let body_bytes = resp.bytes().await
+                            .map_err(|e| JsError::from_opaque(JsString::from(e.to_string()).into()))?;
+                        let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+
+                        Ok::<_, JsError>((status, status_text, headers_vec, body_text))
+                    })?;
+
+                // 构造 Response JS 对象
+                let body_json = serde_json::to_string(&body_text).unwrap_or_else(|_| "\"\"".into());
+                let headers_map: std::collections::HashMap<String, String> =
+                    headers_vec.into_iter().collect();
+                let headers_json =
+                    serde_json::to_string(&headers_map).unwrap_or_else(|_| "{}".into());
+                let ok_str = if (200..300).contains(&status) {
+                    "true"
+                } else {
+                    "false"
+                };
+                let status_text_escaped = status_text.replace('"', "\\\"");
+                let url_safe = url_str.replace('"', "\\\"").replace('\n', "");
+
+                // 创建 Promise：立即 resolve 为构造好的 Response 对象
+                let response_js = format!(
+                    "new Promise(resolve => resolve((function() {{
+                        const body = {body_json};
+                        const headers = {headers_json};
+                        const hdr = {{
+                            get: (name) => headers[name.toLowerCase()] || null,
+                            has: (name) => name.toLowerCase() in headers,
+                            forEach: (cb) => Object.entries(headers).forEach(([k,v]) => cb(v,k)),
+                        }};
+                        return {{
+                            ok: {ok},
+                            status: {status},
+                            statusText: \"{status_text}\",
+                            headers: hdr,
+                            url: \"{url_safe}\",
+                            type: \"basic\",
+                            redirected: false,
+                            body: null,
+                            bodyUsed: false,
+                            text: () => Promise.resolve(body),
+                            json: () => Promise.resolve(JSON.parse(body)),
+                            blob: () => Promise.resolve(new Blob([body])),
+                            arrayBuffer: () => Promise.resolve(new TextEncoder().encode(body).buffer),
+                            clone: function() {{ return Object.assign({{}}, this); }},
+                        }};
+                    }})()))",
+                    body_json = body_json,
+                    headers_json = headers_json,
+                    ok = ok_str,
+                    status = status,
+                    status_text = status_text_escaped,
+                    url_safe = url_safe,
+                );
+
+                let result = context
+                    .eval(Source::from_bytes(response_js.as_bytes()))
+                    .map_err(|e| {
+                        JsError::from_opaque(
+                            JsString::from(format!("fetch response eval error: {}", e)).into(),
+                        )
+                    })?;
+
+                Ok(result)
+            }
+
+            let fetch_fn = NativeFunction::from_fn_ptr(fetch_impl);
+            let fetch_func = fetch_fn.to_js_function(context.realm());
+            let _ = context.register_global_property(
+                JsString::from("fetch"),
+                fetch_func,
+                Attribute::WRITABLE | Attribute::CONFIGURABLE,
+            );
+
+            info!("fetch() 函数已注册，返回 Promise");
         }
 
         pub fn evaluate(&mut self, code: &str) -> Result<String, String> {
@@ -150,12 +296,12 @@ mod backend {
             self.url = url.to_string();
         }
 
+        #[allow(unused_variables)]
         pub fn dispatch_event(
             &mut self,
             _node_id: u32,
             _event_type: &str,
         ) -> Result<String, String> {
-            // Boa 中没有 DOM，dispatchEvent 简化为 no-op
             Ok("ok".to_string())
         }
     }
@@ -165,20 +311,6 @@ mod backend {
 // 统一对外类型
 // ═══════════════════════════════════════════════════════════════
 
-/// JS 引擎包装器
-///
-/// 根据编译 feature 选择后端：
-/// - `boa` feature → Boa Engine（纯 Rust，默认）
-/// - `js` feature → obscura-js（V8/deno_core）
-///
-/// # 示例
-///
-/// ```ignore
-/// let mut engine = JsEngine::new();
-/// engine.initialize("https://example.com").unwrap();
-/// let result = engine.evaluate("1 + 2").unwrap();
-/// assert_eq!(result, "3");
-/// ```
 pub struct JsEngine {
     #[cfg(feature = "boa")]
     inner: backend::BoaJsEngine,
@@ -253,7 +385,6 @@ mod js_backend {
 use js_backend::ObscuraJsEngine;
 
 impl JsEngine {
-    /// 创建新的 JS 引擎
     pub fn new() -> Self {
         #[cfg(feature = "boa")]
         {
@@ -276,7 +407,6 @@ impl JsEngine {
         }
     }
 
-    /// 初始化运行时
     pub fn initialize(&mut self, url: &str) -> Result<(), String> {
         #[cfg(feature = "boa")]
         {
@@ -293,7 +423,6 @@ impl JsEngine {
         }
     }
 
-    /// 执行 JavaScript 代码
     pub fn evaluate(&mut self, code: &str) -> Result<String, String> {
         #[cfg(feature = "boa")]
         {
@@ -310,7 +439,6 @@ impl JsEngine {
         }
     }
 
-    /// 引擎是否就绪
     pub fn is_ready(&self) -> bool {
         #[cfg(feature = "boa")]
         {
@@ -326,7 +454,6 @@ impl JsEngine {
         }
     }
 
-    /// 设置当前 URL
     pub fn set_url(&mut self, url: &str) {
         #[cfg(feature = "boa")]
         {
@@ -342,7 +469,6 @@ impl JsEngine {
         }
     }
 
-    /// 触发 JS 事件
     pub fn dispatch_event(&mut self, node_id: u32, event_type: &str) -> Result<String, String> {
         #[cfg(feature = "boa")]
         {
@@ -359,7 +485,6 @@ impl JsEngine {
         }
     }
 
-    /// 设置 DOM 树（仅 obscura-js 后端支持）
     #[cfg(feature = "js")]
     pub fn set_dom(&self, dom: obscura_dom::tree::DomTree) {
         self.inner.set_dom(dom);
