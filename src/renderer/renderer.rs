@@ -850,11 +850,13 @@ impl<'a> TaffyRenderer<'a> {
                             let default_color = Color::from_hex("#333333");
                             let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
                             // 水平 padding 保持 10px，垂直居中
+                            // text_y 是 cosmic-text 的基线位置（不是文本顶部）
+                            // 基线 = 顶部 + 字体大小
                             let padding_x = 10.0;
                             let text_y = if h > actual_font_size {
-                                y + (h - actual_font_size) / 2.0
+                                y + (h - actual_font_size) / 2.0 + actual_font_size
                             } else {
-                                y + 2.0
+                                y + 2.0 + actual_font_size
                             };
                             self.render_text_at_weight(
                                 &text_content,
