@@ -368,7 +368,8 @@ impl TaffyLayoutEngine {
             | "header" | "footer" | "nav" | "aside" | "main" | "ul" | "ol" | "li" | "form"
             | "table" | "tr" => {
                 style.display = Display::Block;
-                style.flex_direction = FlexDirection::Column;
+                // 不设置 flex_direction，保留 taffy 默认（Row），
+                // 这样 display:flex 的子元素默认水平排列
             }
             "span" | "a" | "em" | "strong" | "b" | "i" | "code" => {
                 style.display = Display::Block;
@@ -461,7 +462,7 @@ impl TaffyLayoutEngine {
                 "block" => style.display = Display::Block,
                 "flex" | "inline-flex" => {
                     style.display = Display::Flex;
-                    style.flex_direction = FlexDirection::Column;
+                    // flex-direction 稍后单独解析，这里不硬编码
                 }
                 "grid" => style.display = Display::Grid,
                 "none" => style.display = Display::None,
@@ -569,6 +570,86 @@ impl TaffyLayoutEngine {
                 "center" => style.align_items = Some(AlignItems::Center),
                 "stretch" => style.align_items = Some(AlignItems::Stretch),
                 "baseline" => style.align_items = Some(AlignItems::Baseline),
+                _ => {}
+            }
+        }
+
+        // 解析 flex 属性（flex: 1, flex: 2 等）
+        if let Some(flex_val) = get_declaration(decls, "flex") {
+            // 支持 flex: <number> 和 flex: <number> <number> <number>
+            let parts: Vec<&str> = flex_val.split_whitespace().collect();
+            if let Some(grow_str) = parts.first() {
+                if let Ok(grow) = grow_str.parse::<f32>() {
+                    style.flex_grow = grow;
+                    // 如果只指定了一个值，flex-shrink 和 flex-basis 用默认
+                    if parts.len() == 1 {
+                        style.flex_shrink = 1.0;
+                        style.flex_basis = percent(0.0);
+                    }
+                }
+            }
+        }
+
+        // 解析 flex-grow
+        if let Some(fg) = get_declaration(decls, "flex-grow") {
+            if let Ok(grow) = fg.parse::<f32>() {
+                style.flex_grow = grow;
+            }
+        }
+
+        // 解析 flex-shrink
+        if let Some(fs) = get_declaration(decls, "flex-shrink") {
+            if let Ok(shrink) = fs.parse::<f32>() {
+                style.flex_shrink = shrink;
+            }
+        }
+
+        // 解析 flex-basis
+        if let Some(fb) = get_declaration(decls, "flex-basis") {
+            if fb == "0" || fb == "0%" {
+                style.flex_basis = percent(0.0);
+            } else if let Some(px) = parse_length(&fb) {
+                if fb.contains('%') {
+                    style.flex_basis = percent(px / 100.0);
+                } else {
+                    style.flex_basis = length(px);
+                }
+            } else if fb == "auto" {
+                style.flex_basis = auto();
+            }
+        }
+
+        // 解析 gap
+        if let Some(gap_val) = get_declaration(decls, "gap") {
+            if let Some(px) = parse_length(&gap_val) {
+                let g = if gap_val.contains('%') {
+                    percent(px / 100.0)
+                } else {
+                    length(px)
+                };
+                style.gap = Size {
+                    width: g,
+                    height: g,
+                };
+            }
+        }
+
+        // 解析 flex-wrap
+        if let Some(fw) = get_declaration(decls, "flex-wrap") {
+            match fw.as_str() {
+                "wrap" => style.flex_wrap = FlexWrap::Wrap,
+                "nowrap" => style.flex_wrap = FlexWrap::NoWrap,
+                "wrap-reverse" => style.flex_wrap = FlexWrap::WrapReverse,
+                _ => {}
+            }
+        }
+
+        // 解析 text-align
+        if let Some(ta) = get_declaration(decls, "text-align") {
+            match ta.as_str() {
+                "center" => style.justify_content = Some(JustifyContent::Center),
+                "left" => style.justify_content = Some(JustifyContent::FlexStart),
+                "right" => style.justify_content = Some(JustifyContent::FlexEnd),
                 _ => {}
             }
         }

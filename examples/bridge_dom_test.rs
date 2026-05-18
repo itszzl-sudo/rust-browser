@@ -75,34 +75,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             <p id="p3" style="font-size: 11px; color: #999; border-left: 3px solid #1a73e8; padding-left: 8px; margin: 3px 0;">"The quick brown fox jumps over the lazy dog."</p>
         </div>
 
-        <!-- 卡片三：布局测试 -->
+        <!-- 卡片三：Flex 三栏布局 -->
         <div id="card-flex" style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
-            <h2 id="title-flex" style="color: #333; margin: 0 0 6px 0; font-size: 15px;">三栏布局（使用table）</h2>
-            <table style="width:100%; border-collapse: collapse;">
-                <tr>
-                    <td id="flex-left" style="width:30%; background:#e3f2fd; padding:8px; border-radius:4px; text-align:center;">
-                        <div id="left-label" style="font-size:18px; color:#1565c0;">左</div>
-                        <div id="left-desc" style="font-size:11px; color:#666;">flex: 1</div>
-                    </td>
-                    <td id="flex-center" style="width:40%; background:#fce4ec; padding:8px; border-radius:4px; text-align:center;">
-                        <div id="center-label" style="font-size:18px; color:#c62828;">中</div>
-                        <div id="center-desc" style="font-size:11px; color:#666;">flex: 2</div>
-                    </td>
-                    <td id="flex-right" style="width:30%; background:#e8f5e9; padding:8px; border-radius:4px; text-align:center;">
-                        <div id="right-label" style="font-size:18px; color:#2e7d32;">右</div>
-                        <div id="right-desc" style="font-size:11px; color:#666;">flex: 1</div>
-                    </td>
-                </tr>
-            </table>
+            <h2 id="title-flex" style="color: #333; margin: 0 0 6px 0; font-size: 15px;">Flex 三栏布局</h2>
+            <div id="flex-container" style="display: flex; gap: 8px; width: 100%;">
+                <div id="flex-left" style="flex: 1; background:#e3f2fd; padding:8px; border-radius:4px; text-align:center;">
+                    <div id="left-label" style="font-size:18px; color:#1565c0;">左</div>
+                    <div id="left-desc" style="font-size:11px; color:#666;">flex: 1</div>
+                </div>
+                <div id="flex-center" style="flex: 2; background:#fce4ec; padding:8px; border-radius:4px; text-align:center;">
+                    <div id="center-label" style="font-size:18px; color:#c62828;">中</div>
+                    <div id="center-desc" style="font-size:11px; color:#666;">flex: 2</div>
+                </div>
+                <div id="flex-right" style="flex: 1; background:#e8f5e9; padding:8px; border-radius:4px; text-align:center;">
+                    <div id="right-label" style="font-size:18px; color:#2e7d32;">右</div>
+                    <div id="right-desc" style="font-size:11px; color:#666;">flex: 1</div>
+                </div>
+            </div>
         </div>
 
-        <!-- 卡片四：点击事件测试（不加flex，用表格/行内） -->
+        <!-- 卡片四：点击事件测试 -->
         <div id="card-click" style="background: white; border-radius: 6px; padding: 10px;">
             <h2 id="title-click" style="color: #333; margin: 0 0 6px 0; font-size: 15px;">点击事件测试</h2>
-            <div>
-                <button id="btn-clickme" style="background:#1a73e8; color:white; border:none; padding:6px 14px; border-radius:4px; font-size:12px; width:70px; height:30px; display:inline-block;">点击我</button>
-                <button id="btn-reset" style="background:#f5f5f5; color:#666; border:1px solid #ddd; padding:6px 14px; border-radius:4px; font-size:12px; width:60px; height:30px; display:inline-block; margin-left:6px;">重置</button>
-                <a id="link-example" style="color:#1a73e8; font-size:12px; margin-left:10px;">链接示例</a>
+            <div id="click-container" style="display: flex; gap: 8px; align-items: center;">
+                <button id="btn-clickme" style="background:#1a73e8; color:white; border:none; padding:6px 14px; border-radius:4px; font-size:12px; width:70px; height:30px;">点击我</button>
+                <button id="btn-reset" style="background:#f5f5f5; color:#666; border:1px solid #ddd; padding:6px 14px; border-radius:4px; font-size:12px; width:60px; height:30px;">重置</button>
+                <a id="link-example" style="color:#1a73e8; font-size:12px;">链接示例</a>
             </div>
         </div>
     </div>
