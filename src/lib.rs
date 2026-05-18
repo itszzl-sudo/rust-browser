@@ -28,7 +28,9 @@ pub mod css;
 pub mod css_engine;
 pub mod dom_wrapper;
 
-#[cfg(feature = "js")]
+// JS 引擎：支持 boa（默认，纯 Rust）和 js（V8/deno_core）两个后端
+// 不带任一 feature 时 = 无 JS 引擎
+#[cfg(any(feature = "boa", feature = "js"))]
 pub mod js_engine;
 pub mod mojo;
 pub mod network;

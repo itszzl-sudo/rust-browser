@@ -30,6 +30,10 @@ obscura-dom = { path = "../obscura/crates/obscura-dom" }
 obscura-js = { path = "../obscura/crates/obscura-js", optional = true }
 obscura-net = { path = "../obscura/crates/obscura-net" }
 
+# Boa JS 引擎（纯 Rust，无需 V8，可选）
+boa_engine = { version = "0.21", optional = true }
+boa_gc = { version = "0.21", optional = true }
+
 # GUI 可选（Windows wgpu 编译问题）
 eframe = { version = "0.34", optional = true, default-features = false, features = ["default"] }
 egui = { version = "0.34", optional = true }
@@ -59,8 +63,9 @@ brotli = "7.0"
 flate2 = "1.0"
 
 [features]
-default = ["js", "gui"]
+default = ["boa", "gui"]
 js = ["obscura-js"]
+boa = ["boa_engine", "boa_gc"]
 gui = ["eframe", "egui"]
 
 [profile.release]

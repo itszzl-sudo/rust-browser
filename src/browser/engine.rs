@@ -2,7 +2,7 @@
 //!
 //! 使用 obscura-net, kuchiki, Taffy 布局和 tiny-skia 渲染
 
-#[cfg(feature = "js")]
+#[cfg(any(feature = "boa", feature = "js"))]
 use crate::js_engine::JsEngine;
 use crate::{renderer::Renderer, DomWrapper, NetworkClient};
 use log::{debug, error, info, warn};
@@ -69,7 +69,7 @@ pub struct BrowserEngine {
     title: Option<String>,
     current_url: Option<String>,
     network_client: NetworkClient,
-    #[cfg(feature = "js")]
+    #[cfg(any(feature = "boa", feature = "js"))]
     js_engine: JsEngine,
 }
 
@@ -88,7 +88,7 @@ impl BrowserEngine {
             title: None,
             current_url: None,
             network_client,
-            #[cfg(feature = "js")]
+            #[cfg(any(feature = "boa", feature = "js"))]
             js_engine: JsEngine::new(),
         })
     }
@@ -109,7 +109,7 @@ impl BrowserEngine {
         self.current_url = Some(url.to_string());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
 
-        #[cfg(feature = "js")]
+        #[cfg(any(feature = "boa", feature = "js"))]
         self.run_page_scripts(url, &html);
 
         info!("页面加载成功");
@@ -134,7 +134,7 @@ impl BrowserEngine {
         self.current_url = Some(url.to_string());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
 
-        #[cfg(feature = "js")]
+        #[cfg(any(feature = "boa", feature = "js"))]
         self.run_page_scripts(url, &html);
 
         info!("页面加载成功");
@@ -149,7 +149,7 @@ impl BrowserEngine {
         self.current_url = Some(url.to_string());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
 
-        #[cfg(feature = "js")]
+        #[cfg(any(feature = "boa", feature = "js"))]
         self.run_page_scripts(url, html);
 
         Ok(())
@@ -165,7 +165,7 @@ impl BrowserEngine {
                 self.current_url = Some(path.to_string());
                 self.title = self.document.as_ref().and_then(|d| d.title.clone());
 
-                #[cfg(feature = "js")]
+                #[cfg(any(feature = "boa", feature = "js"))]
                 self.run_page_scripts(path, &html);
 
                 info!("本地文件加载成功");
@@ -190,7 +190,7 @@ impl BrowserEngine {
     }
 
     /// 执行页面中的 `<script>` 标签
-    #[cfg(feature = "js")]
+    #[cfg(any(feature = "boa", feature = "js"))]
     fn run_page_scripts(&mut self, url: &str, html: &str) {
         // 初始化 JS 引擎
         if let Err(e) = self.js_engine.initialize(url) {
@@ -242,7 +242,7 @@ impl BrowserEngine {
     }
 
     /// 下载外部脚本
-    #[cfg(feature = "js")]
+    #[cfg(any(feature = "boa", feature = "js"))]
     fn download_script(&self, url: &str) -> Option<String> {
         let rt = tokio::runtime::Runtime::new().ok()?;
         rt.block_on(async {
@@ -297,7 +297,7 @@ impl BrowserEngine {
         if self.document.is_none() {
             return Err(BrowserError::PageNotLoaded);
         }
-        #[cfg(feature = "js")]
+        #[cfg(any(feature = "boa", feature = "js"))]
         {
             let result = self
                 .js_engine
