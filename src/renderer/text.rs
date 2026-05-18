@@ -3,6 +3,7 @@
 //! 处理文本布局和渲染
 
 use crate::css::values::Color;
+use cosmic_text::{Align, Attrs, Buffer, FontSystem, Metrics, Shaping, Wrap};
 
 /// 文本渲染器
 pub struct TextRenderer {
@@ -39,21 +40,46 @@ impl TextRenderer {
         self.line_height = height;
     }
 
-    /// 测量文本尺寸
+    /// 测量文本尺寸（快速估计，所有字符等宽）
+    ///
+    /// 对于需要高精度的场景（如 CJK 字符、可变宽度字体），
+    /// 请使用 [`Self::measure_text_accurate`] 方法替代。
     pub fn measure_text(&self, text: &str) -> (f32, f32) {
         // 简化实现：按字符估计宽度
         let char_width = self.default_font_size * 0.6;
         let width = text.len() as f32 * char_width;
         let height = self.default_font_size * self.line_height;
-        
+
         (width, height)
+    }
+
+    /// 使用 cosmic-text 精确测量文本尺寸。
+    ///
+    /// 支持可变宽度字体、CJK 字符、emoji 等复杂字形，
+    /// 返回准确的 (宽度, 高度)。
+    ///
+    /// # 参数
+    /// - `text`: 要测量的文本
+    /// - `font_system`: cosmic-text 字体系统
+    /// - `max_width`: 最大可用宽度（用于自动换行）
+    /// - `font_size`: 字体大小（覆盖默认值）
+    /// - `line_height`: 行高倍率（覆盖默认值）
+    pub fn measure_text_accurate(
+        &self,
+        text: &str,
+        font_system: &mut FontSystem,
+        max_width: f32,
+        font_size: f32,
+        line_height: f32,
+    ) -> (f32, f32) {
+        measure_text_cosmic(text, font_system, max_width, font_size, line_height)
     }
 
     /// 测量多行文本
     pub fn measure_multiline(&self, text: &str, max_width: f32) -> Vec<(String, (f32, f32))> {
         let char_width = self.default_font_size * 0.6;
         let chars_per_line = (max_width / char_width).floor() as usize;
-        
+
         if chars_per_line == 0 {
             return vec![];
         }
@@ -92,7 +118,7 @@ impl TextRenderer {
     pub fn line_break(&self, text: &str, max_width: f32) -> Vec<usize> {
         let char_width = self.default_font_size * 0.6;
         let chars_per_line = (max_width / char_width).floor() as usize;
-        
+
         if chars_per_line == 0 || text.is_empty() {
             return vec![];
         }
@@ -122,6 +148,50 @@ impl Default for TextRenderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 使用 cosmic-text 精确测量文本尺寸（独立函数，无需 TextRenderer 实例）。
+///
+/// # 返回值
+/// `(width, height)` — 文本实际占用的宽度和高度。
+/// - 宽度为所有行中的最大宽度。
+/// - 高度为行数 × 行高。
+///
+/// 如果文本为空，返回 `(0.0, 0.0)`。
+pub fn measure_text_cosmic(
+    text: &str,
+    font_system: &mut FontSystem,
+    max_width: f32,
+    font_size: f32,
+    line_height: f32,
+) -> (f32, f32) {
+    let text = text.trim();
+    if text.is_empty() || font_size <= 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let lh = font_size * line_height;
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, lh));
+
+    buffer.set_size(Some(max_width.max(50.0)), Some(f32::INFINITY));
+    buffer.set_wrap(Wrap::Word);
+    let attrs = Attrs::new();
+    buffer.set_text(text, &attrs, Shaping::Advanced, Some(Align::Left));
+    buffer.shape_until_scroll(font_system, true);
+
+    // 从 layout_runs 中获取每行的实际宽度
+    let mut max_line_width = 0.0f32;
+    let mut line_count = 0usize;
+
+    for run in buffer.layout_runs() {
+        max_line_width = max_line_width.max(run.line_w);
+        line_count += 1;
+    }
+
+    let width = max_line_width.ceil();
+    let height = (line_count as f32 * lh).max(if line_count > 0 { lh } else { 0.0 });
+
+    (width, height)
 }
 
 /// 文本片段

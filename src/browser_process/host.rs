@@ -494,7 +494,7 @@ fn run_renderer_process(
                         debug!("Renderer #{} MouseMove at ({:.1}, {:.1})", id, x, y);
 
                         // 在 Taffy 布局结果中查找 hover 节点
-                        if let Some(doc) = &renderer.document() {
+                        if renderer.document().is_some() {
                             if let Some(taffy) = renderer.taffy_layout() {
                                 let hit = taffy.hit_test(x, y);
                                 let hovered_dom = hit.map(|n| n.dom_node);
@@ -628,10 +628,10 @@ fn load_document(url: &str) -> Result<Document, String> {
         }
     } else {
         // 网络请求（同步，使用 reqwest blocking client）
-        let html = crate::network::NetworkClient::new()
+        let (html, final_url) = crate::network::NetworkClient::new()
             .fetch_html_blocking(url)
             .map_err(|e| format!("网络请求失败: {}", e))?;
-        Ok(Document::from_html(&html, url))
+        Ok(Document::from_html(&html, &final_url))
     }
 }
 

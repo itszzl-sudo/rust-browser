@@ -230,6 +230,133 @@ fn build_rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tin
     pb.finish()
 }
 
+/// 构建单边圆角路径（包含相邻的两个圆角弧线）
+///
+/// 为指定的侧边构建路径，包括该侧的直线段和相邻的两个角弧线。
+/// side: "top", "right", "bottom", "left"
+fn build_rounded_side_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    side: &str,
+) -> Option<tiny_skia::Path> {
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+
+    let r = r.min(w / 2.0).min(h / 2.0);
+    let mut pb = PathBuilder::new();
+
+    match side {
+        "top" => {
+            if r > 0.0 {
+                // 从左边开始：左上角弧线 -> 上边直线 -> 右上角弧线
+                pb.move_to(x, y + r);
+                pb.cubic_to(x, y + r * 0.448, x + r * 0.448, y, x + r, y);
+                pb.line_to(x + w - r, y);
+                pb.cubic_to(x + w - r * 0.448, y, x + w, y + r * 0.448, x + w, y + r);
+            } else {
+                pb.move_to(x, y);
+                pb.line_to(x + w, y);
+            }
+        }
+        "right" => {
+            if r > 0.0 {
+                // 从上边开始：右上角弧线 -> 右边直线 -> 右下角弧线
+                pb.move_to(x + w - r, y);
+                pb.cubic_to(x + w - r * 0.448, y, x + w, y + r * 0.448, x + w, y + r);
+                pb.line_to(x + w, y + h - r);
+                pb.cubic_to(
+                    x + w,
+                    y + h - r * 0.448,
+                    x + w - r * 0.448,
+                    y + h,
+                    x + w - r,
+                    y + h,
+                );
+            } else {
+                pb.move_to(x + w, y);
+                pb.line_to(x + w, y + h);
+            }
+        }
+        "bottom" => {
+            if r > 0.0 {
+                // 从右边开始：右下角弧线 -> 下边直线 -> 左下角弧线
+                pb.move_to(x + w, y + h - r);
+                pb.cubic_to(
+                    x + w,
+                    y + h - r * 0.448,
+                    x + w - r * 0.448,
+                    y + h,
+                    x + w - r,
+                    y + h,
+                );
+                pb.line_to(x + r, y + h);
+                pb.cubic_to(x + r * 0.448, y + h, x, y + h - r * 0.448, x, y + h - r);
+            } else {
+                pb.move_to(x + w, y + h);
+                pb.line_to(x, y + h);
+            }
+        }
+        "left" => {
+            if r > 0.0 {
+                // 从下边开始：左下角弧线 -> 左边直线 -> 左上角弧线
+                pb.move_to(x + r, y + h);
+                pb.cubic_to(x + r * 0.448, y + h, x, y + h - r * 0.448, x, y + h - r);
+                pb.line_to(x, y + r);
+                pb.cubic_to(x, y + r * 0.448, x + r * 0.448, y, x + r, y);
+            } else {
+                pb.move_to(x, y + h);
+                pb.line_to(x, y);
+            }
+        }
+        _ => return None,
+    }
+
+    pb.finish()
+}
+
+/// 绘制单个边框边的辅助函数（含笔触设置，供圆角非均匀场景使用）
+fn draw_side_with_style(pixmap: &mut tiny_skia::Pixmap, path: &tiny_skia::Path, side: &BorderSide) {
+    if !side.style.is_visible() || side.width <= 0.0 {
+        return;
+    }
+
+    let rgba = side.color.to_rgba();
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+
+    let (line_cap, dash_pattern) = dash_pattern_for_style(side.style, side.width);
+
+    let mut stroke = Stroke::default();
+    stroke.width = side.width;
+    stroke.line_cap = line_cap;
+
+    if !dash_pattern.is_empty() {
+        if let Some(dash) = StrokeDash::new(dash_pattern.clone(), 0.0) {
+            stroke.dash = Some(dash);
+        }
+    }
+
+    pixmap.stroke_path(path, &paint, &stroke, Transform::identity(), None);
+}
+
+/// 检查四个边是否具有统一的样式（相同的颜色、宽度和线条样式）
+fn is_border_uniform(border: &BorderStyle) -> bool {
+    let c = &border.top;
+    border.right.width == c.width
+        && border.bottom.width == c.width
+        && border.left.width == c.width
+        && border.right.color.to_rgba() == c.color.to_rgba()
+        && border.bottom.color.to_rgba() == c.color.to_rgba()
+        && border.left.color.to_rgba() == c.color.to_rgba()
+        && border.right.style == c.style
+        && border.bottom.style == c.style
+        && border.left.style == c.style
+}
+
 /// 绘制完整的 CSS 边框
 ///
 /// 如果 `border.radius > 0`，则使用圆角矩形描边路径绘制所有四条边。
@@ -267,46 +394,49 @@ pub fn draw_border(
     }
 
     if border.radius > 0.0 {
-        // 圆角边框：使用统一的圆角矩形描边
-        // 我们取四边中最具代表性的样式来绘制整个轮廓
-        // 如果四边不一致，简化处理：主要取 top 边样式绘制整个轮廓
-        let primary_style = if border.top.style.is_visible() {
-            &border.top
-        } else if border.right.style.is_visible() {
-            &border.right
-        } else if border.bottom.style.is_visible() {
-            &border.bottom
-        } else if border.left.style.is_visible() {
-            &border.left
+        // 圆角边框
+        if is_border_uniform(border) {
+            // 快速路径：四边统一，使用单条圆角矩形描边
+            let primary = &border.top;
+            let rgba = primary.color.to_rgba();
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+
+            let (line_cap, dash_pattern) = dash_pattern_for_style(primary.style, primary.width);
+
+            let mut stroke = Stroke::default();
+            stroke.width = primary.width;
+            stroke.line_cap = line_cap;
+
+            if !dash_pattern.is_empty() {
+                if let Some(dash) = StrokeDash::new(dash_pattern.clone(), 0.0) {
+                    stroke.dash = Some(dash);
+                }
+            }
+
+            if let Some(path) = build_rounded_rect_path(x, y, w, h, border.radius) {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
         } else {
-            return;
-        };
+            // 非均匀边框：分别绘制四条边，每条边包含相邻的圆角弧线
+            for side in &["top", "right", "bottom", "left"] {
+                let side_style = match *side {
+                    "top" => &border.top,
+                    "right" => &border.right,
+                    "bottom" => &border.bottom,
+                    "left" => &border.left,
+                    _ => continue,
+                };
 
-        let rgba = primary_style.color.to_rgba();
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+                if !side_style.style.is_visible() || side_style.width <= 0.0 {
+                    continue;
+                }
 
-        let (line_cap, dash_pattern) =
-            dash_pattern_for_style(primary_style.style, primary_style.width);
-
-        let mut stroke = Stroke::default();
-        stroke.width = primary_style.width;
-        stroke.line_cap = line_cap;
-
-        if !dash_pattern.is_empty() {
-            if let Some(dash) = StrokeDash::new(dash_pattern.clone(), 0.0) {
-                stroke.dash = Some(dash);
+                if let Some(path) = build_rounded_side_path(x, y, w, h, border.radius, side) {
+                    draw_side_with_style(pixmap, &path, side_style);
+                }
             }
         }
-
-        // 使用圆角矩形路径进行描边
-        if let Some(path) = build_rounded_rect_path(x, y, w, h, border.radius) {
-            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-        }
-
-        // 如果四边颜色或宽度不一致，需要分别绘制各边来覆盖差异
-        // 简化处理：如果 top 与其余边不一致，在圆角模式下暂不处理
-        // 因为圆角路径无法轻易分割为四条单独的边
     } else {
         // 非圆角：分别绘制四条边
         // 上边

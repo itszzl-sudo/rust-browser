@@ -140,7 +140,10 @@ impl DomWrapper {
     pub fn set_attribute(&self, index: usize, name: &str, value: &str) {
         if let Some(node) = self.get_node(index) {
             if let Some(element) = node.as_element() {
-                element.attributes.borrow_mut().insert(name.to_string(), value.to_string());
+                element
+                    .attributes
+                    .borrow_mut()
+                    .insert(name.to_string(), value.to_string());
             }
         }
     }
@@ -253,6 +256,12 @@ impl DomWrapper {
     /// 获取内部文档引用（用于样式计算等）
     pub fn inner_document(&self) -> &NodeRef {
         &self.document
+    }
+
+    /// Look up node index by Rc pointer (fast O(1) lookup)
+    pub fn index_of_node(&self, node_ref: &NodeRef) -> Option<usize> {
+        let rc_ptr = Rc::as_ptr(&node_ref.0) as usize;
+        self.node_to_index.get(&rc_ptr).copied()
     }
 }
 

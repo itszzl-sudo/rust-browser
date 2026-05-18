@@ -16,7 +16,6 @@ use cosmic_text::{Align, Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache
 use kuchiki::NodeRef;
 use log::{debug, info, trace, warn};
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::OnceLock;
 use thiserror::Error;
 use tiny_skia::Pixmap;
@@ -145,8 +144,7 @@ impl Renderer {
 
         let context = RenderContext::new(width, height);
         let painter = Painter::new(width, height)
-            .ok_or(RenderError::PainterCreationFailed)
-            .unwrap();
+            .unwrap_or_else(|| panic!("创建 {}x{} 像素的 Painter 失败", width, height));
         let text_renderer = TextRenderer::new();
 
         // 预热字体系统
@@ -189,9 +187,11 @@ impl Renderer {
 
     /// 渲染存储的文档到 PNG
     pub fn render_to_png(&mut self) -> Result<Vec<u8>, RenderError> {
-        let doc = self.document.clone();
         self.is_loading = true;
+        // 先取出 document（Option take），避免同时可变和不可变借用 self
+        let doc = self.document.take();
         let result = self.render(&doc);
+        self.document = doc;
         self.is_loading = false;
         result
     }
@@ -284,6 +284,7 @@ impl Renderer {
                 painter: &mut self.painter,
                 taffy: &taffy,
                 dom,
+                node_index_cache: std::collections::HashMap::new(),
             };
             renderer.render_dom();
         }
@@ -344,6 +345,7 @@ impl Renderer {
                 painter: &mut self.painter,
                 taffy,
                 dom,
+                node_index_cache: std::collections::HashMap::new(),
             };
             renderer.render_dom();
         }
@@ -615,6 +617,7 @@ struct TaffyRenderer<'a> {
     painter: &'a mut Painter,
     taffy: &'a TaffyLayoutEngine,
     dom: &'a DomWrapper,
+    node_index_cache: std::collections::HashMap<usize, usize>, // Rc ptr → dom index
 }
 
 impl<'a> TaffyRenderer<'a> {
@@ -624,6 +627,15 @@ impl<'a> TaffyRenderer<'a> {
             warn!("Taffy 布局为空，使用简单渲染回退");
             self.render_simple();
             return;
+        }
+
+        // Build node_index_cache: iterate all descendants once
+        self.node_index_cache.clear();
+        for node in self.dom.inner_document().descendants() {
+            if let Some(idx) = self.dom.index_of_node(&node) {
+                let rc_ptr = std::rc::Rc::as_ptr(&node.0) as usize;
+                self.node_index_cache.insert(rc_ptr, idx);
+            }
         }
 
         // 使用 Taffy 布局结果遍历渲染
@@ -900,13 +912,10 @@ impl<'a> TaffyRenderer<'a> {
         }
     }
 
-    /// 通过 NodeRef 的 Rc 指针查找 DOM 索引
+    /// 通过 NodeRef 的 Rc 指针查找 DOM 索引 (O(1) cache lookup)
     fn find_dom_index(&self, node_ref: &NodeRef) -> Option<usize> {
-        let rc_ptr = Rc::as_ptr(&node_ref.0) as usize;
-        self.dom
-            .inner_document()
-            .descendants()
-            .position(|n| Rc::as_ptr(&n.0) as usize == rc_ptr)
+        let rc_ptr = std::rc::Rc::as_ptr(&node_ref.0) as usize;
+        self.node_index_cache.get(&rc_ptr).copied()
     }
 
     /// 精美渲染元素装饰（背景、边框、装饰线等）
@@ -1139,11 +1148,10 @@ impl<'a> TaffyRenderer<'a> {
         let taffy_focused = self.taffy.focused_node;
         node_ref
             .and_then(|nr| {
-                let rc_ptr = Rc::as_ptr(&nr.0) as usize;
-                self.dom
-                    .inner_document()
-                    .descendants()
-                    .position(|n| Rc::as_ptr(&n.0) as usize == rc_ptr)
+                let rc_ptr = std::rc::Rc::as_ptr(&nr.0) as usize;
+                self.node_index_cache
+                    .get(&rc_ptr)
+                    .copied()
                     .and_then(|dom_idx| {
                         if taffy_focused == Some(dom_idx) {
                             Some(true)
@@ -1225,11 +1233,8 @@ impl<'a> TaffyRenderer<'a> {
 
     /// 渲染元素的 box-shadow
     /// 从 layout 获取边框宽度
-    fn get_border_width(&self, tag: &str, layout: &TaffyLayoutNode) -> f32 {
-        // 检查 layout 关联的 taffy style 中的 border
-        // 目前 taffy_layout 中把 border 存到了 taffy style 中
-        // 这里通过 tag 标签取默认边框宽度
-        match tag {
+    fn get_border_width(&self, _tag: &str, _layout: &TaffyLayoutNode) -> f32 {
+        match _tag {
             "input" | "textarea" | "select" => 1.0,
             "button" => 1.0,
             "img" => 0.0,
@@ -1515,7 +1520,10 @@ impl<'a> TaffyRenderer<'a> {
         }
     }
 
-    /// 将字形 alpha 蒙版渲染到 pixmap（使用 direct pixel access）
+    /// 将字形 alpha 蒙版渲染到 pixmap
+    ///
+    /// 使用 tiny-skia 的 `PixmapPaint` + `draw_pixmap` 进行高效 alpha 混合，
+    /// 比起逐像素手动操作有更好的性能。
     fn render_glyph_image(
         &mut self,
         x: f32,
@@ -1529,58 +1537,46 @@ impl<'a> TaffyRenderer<'a> {
             return;
         }
 
+        // 字形蒙版通常是灰度图（alpha 通道），需要将其着色为目标颜色
+        // 创建一个 RGBA 临时 Pixmap，从 alpha_data 构建颜色像素
+        let Some(mut glyph_pixmap) = tiny_skia::Pixmap::new(width, height) else {
+            return;
+        };
+
         let text_rgba = color.to_rgba();
-        let pixmap_width = self.painter.pixmap_mut().width();
-        let pixmap_height = self.painter.pixmap_mut().height();
+        let glyph_data = glyph_pixmap.data_mut();
 
-        let pixel_data = self.painter.pixmap_mut().data_mut();
-        let stride = pixmap_width as usize * 4;
-
-        for row in 0..height {
-            for col in 0..width {
-                let alpha_idx = (row * width + col) as usize;
-                if alpha_idx >= alpha_data.len() {
-                    continue;
-                }
-
-                let alpha = alpha_data[alpha_idx];
-                if alpha == 0 {
-                    continue;
-                }
-
-                let px = (x + col as f32) as i32;
-                let py = (y + row as f32) as i32;
-
-                if px < 0 || py < 0 {
-                    continue;
-                }
-
-                let px_u = px as u32;
-                let py_u = py as u32;
-
-                if px_u >= pixmap_width || py_u >= pixmap_height {
-                    continue;
-                }
-
-                let pixel_idx = (py_u as usize) * stride + (px_u as usize) * 4;
-                if pixel_idx + 3 < pixel_data.len() {
-                    let bg_r = pixel_data[pixel_idx];
-                    let bg_g = pixel_data[pixel_idx + 1];
-                    let bg_b = pixel_data[pixel_idx + 2];
-
-                    let a_norm = alpha as f32 / 255.0;
-                    let inv_a = 1.0 - a_norm;
-
-                    pixel_data[pixel_idx] =
-                        (text_rgba[0] as f32 * a_norm + bg_r as f32 * inv_a) as u8;
-                    pixel_data[pixel_idx + 1] =
-                        (text_rgba[1] as f32 * a_norm + bg_g as f32 * inv_a) as u8;
-                    pixel_data[pixel_idx + 2] =
-                        (text_rgba[2] as f32 * a_norm + bg_b as f32 * inv_a) as u8;
-                    pixel_data[pixel_idx + 3] = 255;
-                }
+        for (i, &alpha) in alpha_data.iter().enumerate() {
+            if i * 4 + 3 >= glyph_data.len() {
+                break;
+            }
+            if alpha == 0 {
+                glyph_data[i * 4] = 0;
+                glyph_data[i * 4 + 1] = 0;
+                glyph_data[i * 4 + 2] = 0;
+                glyph_data[i * 4 + 3] = 0;
+            } else {
+                // 将 alpha 值与目标颜色相乘
+                let a = alpha as u16;
+                glyph_data[i * 4] = (text_rgba[0] as u16 * a / 255) as u8;
+                glyph_data[i * 4 + 1] = (text_rgba[1] as u16 * a / 255) as u8;
+                glyph_data[i * 4 + 2] = (text_rgba[2] as u16 * a / 255) as u8;
+                glyph_data[i * 4 + 3] = alpha;
             }
         }
+
+        // 使用 SourceOver blend mode 将字形合成到主 pixmap
+        self.painter.pixmap_mut().draw_pixmap(
+            x as i32,
+            y as i32,
+            glyph_pixmap.as_ref(),
+            &tiny_skia::PixmapPaint {
+                blend_mode: tiny_skia::BlendMode::SourceOver,
+                ..tiny_skia::PixmapPaint::default()
+            },
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 }
 

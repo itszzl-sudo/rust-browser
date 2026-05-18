@@ -153,7 +153,7 @@ impl ThreadPool {
         injector: &Injector<Task>,
     ) -> bool {
         // 1. Local queue (LIFO — most cache-friendly).
-        if let Ok(mut w) = workers[i].lock() {
+        if let Ok(w) = workers[i].lock() {
             if let Some(task) = w.worker.pop() {
                 drop(w);
                 task.run();
@@ -163,7 +163,7 @@ impl ThreadPool {
 
         // 2. Global injector (FIFO — fair scheduling across sources).
         {
-            let mut local = workers[i].lock().unwrap();
+            let local = workers[i].lock().unwrap();
             match injector.steal_batch_and_pop(&local.worker) {
                 Steal::Success(task) => {
                     drop(local);
@@ -181,14 +181,14 @@ impl ThreadPool {
             if j == i {
                 continue;
             }
-            if let Ok(mut victim) = workers[j].lock() {
+            if let Ok(victim) = workers[j].lock() {
                 let stealer = victim.worker.stealer();
                 // We need a *second* lock on our own worker to receive the
                 // stolen batch — release the victim lock first to avoid a
                 // deadlock (the lock order is always increasing index).
                 drop(victim);
 
-                let mut local = workers[i].lock().unwrap();
+                let local = workers[i].lock().unwrap();
                 match stealer.steal_batch_and_pop(&local.worker) {
                     Steal::Success(task) => {
                         drop(local);

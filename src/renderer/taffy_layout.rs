@@ -380,11 +380,25 @@ impl TaffyLayoutEngine {
         result
     }
 
-    /// 用 cosmic-text 测量文本高度
-    /// 支持 font-family 备选链：依次尝试备选字体，第一个成功的就使用
+    /// 用 cosmic-text 精确测量文本高度。
+    ///
+    /// 通过 `layout_runs()` 的 `line_y` 区分实际行数，
+    /// 避免同一行的多 run 导致行数虚高。
     fn measure_text_height(&self, text: &str, font_size: f32, line_height: f32) -> f32 {
-        if text.trim().is_empty() {
-            return 0.0;
+        self.measure_text_dimensions(text, font_size, line_height).1
+    }
+
+    /// 用 cosmic-text 精确测量文本尺寸，返回 (宽度, 高度)。
+    ///
+    /// - 宽度：所有行中 layout run 的最大宽度
+    /// - 高度：实际行数 × 行高 + 内边距
+    ///
+    /// 支持可变宽度字体、CJK 字符、emoji 等复杂字形。
+    /// line_height 可以是倍率（如 1.54）或 px 值（如 22.0）。
+    fn measure_text_dimensions(&self, text: &str, font_size: f32, line_height: f32) -> (f32, f32) {
+        let text = text.trim();
+        if text.is_empty() || font_size <= 0.0 {
+            return (0.0, 0.0);
         }
 
         let max_width = match self.viewport.width {
@@ -396,11 +410,9 @@ impl TaffyLayoutEngine {
         // 如果 > 20 且 < 200 视为 px 值；否则视为倍率
         let lh = if line_height > 0.0 {
             if line_height > 20.0 && line_height < 200.0 {
-                // px 值
-                line_height
+                line_height // px 值
             } else {
-                // 倍率
-                font_size * line_height
+                font_size * line_height // 倍率
             }
         } else {
             font_size * 1.375
@@ -415,8 +427,26 @@ impl TaffyLayoutEngine {
         buffer.set_text(text, &attrs, Shaping::Advanced, Some(Align::Left));
         buffer.shape_until_scroll(&mut font_system, true);
 
-        let total_height = buffer.layout_runs().count() as f32 * lh;
-        total_height + 10.0 // 额外 padding
+        // 通过 line_y 区分实际行数，并用 layout_runs 的 line_w 获取最大宽度
+        let mut max_line_width = 0.0f32;
+        let mut line_count = 0usize;
+        let mut last_line_y: Option<f32> = None;
+
+        for run in buffer.layout_runs() {
+            // 追踪最大宽度
+            max_line_width = max_line_width.max(run.line_w);
+
+            // 通过 line_y 变化来计数实际行数
+            if last_line_y.map_or(true, |last| (run.line_y - last).abs() > 0.5) {
+                line_count += 1;
+                last_line_y = Some(run.line_y);
+            }
+        }
+
+        let total_height = (line_count.max(1) as f32 * lh) + 10.0; // 额外 padding
+        let total_width = max_line_width.ceil().max(50.0);
+
+        (total_width, total_height)
     }
 
     /// 确定样式：合并标签默认 + style_map + 内联样式

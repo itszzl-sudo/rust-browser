@@ -10,7 +10,7 @@
 //! 通过 `new()` / `initialize()` / `evaluate()` / `is_ready()` 等
 //! 方法操作，不依赖后端细节。
 
-use log::{info, warn};
+use log::info;
 
 // ═══════════════════════════════════════════════════════════════
 // Boa 后端（默认，纯 Rust）
@@ -24,8 +24,8 @@ mod backend {
     use boa_engine::native_function::NativeFunction;
     use boa_engine::property::Attribute;
     use boa_engine::JsString;
-    use boa_engine::{Context, JsArgs, JsError, JsNativeError, JsResult, JsValue, Source};
-    use log::{error, info, warn};
+    use boa_engine::{Context, JsArgs, JsError, JsResult, JsValue, Source};
+    use log::{info, warn};
 
     use crate::network::NetworkClient;
 
@@ -322,7 +322,7 @@ pub struct JsEngine {
 
 #[cfg(feature = "js")]
 mod js_backend {
-    use log::{info, warn};
+    use log::info;
 
     pub struct ObscuraJsEngine {
         runtime: Option<obscura_js::runtime::ObscuraJsRuntime>,

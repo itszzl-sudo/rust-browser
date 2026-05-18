@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 
 use crate::bridge::{
-    self, Color, Declaration, EventHandler, FormHandler, LayoutNode, LayoutRect, WebNativeBridge,
+    Color, EventHandler, FormHandler, LayoutNode, LayoutRect, WebNativeBridge, WindowOpenHandler,
 };
 use crate::css::values::Color as CssColor;
-use crate::css_engine::{get_declaration, parse_inline_style, Declaration as CssDeclaration};
+use crate::css_engine::{parse_inline_style, Declaration as CssDeclaration};
 use crate::dom_wrapper::DomWrapper;
 use crate::renderer::taffy_layout::{TaffyLayoutEngine, TaffyLayoutNode};
 use crate::renderer::Renderer;

@@ -100,13 +100,13 @@ impl BrowserEngine {
             return self.load_local_file(url);
         }
 
-        let html = RUNTIME
+        let (html, final_url) = RUNTIME
             .block_on(self.network_client.fetch_html(url))
             .map_err(|e| BrowserError::NetworkError(e.to_string()))?;
 
-        let doc = Document::from_html(&html, url);
+        let doc = Document::from_html(&html, &final_url);
         self.document = Some(doc);
-        self.current_url = Some(url.to_string());
+        self.current_url = Some(final_url);
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
 
         #[cfg(any(feature = "boa", feature = "js"))]
@@ -123,15 +123,15 @@ impl BrowserEngine {
             return self.load_local_file(url);
         }
 
-        let html = self
+        let (html, final_url) = self
             .network_client
             .fetch_html(url)
             .await
             .map_err(|e| BrowserError::NetworkError(e.to_string()))?;
 
-        let doc = Document::from_html(&html, url);
+        let doc = Document::from_html(&html, &final_url);
         self.document = Some(doc);
-        self.current_url = Some(url.to_string());
+        self.current_url = Some(final_url);
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
 
         #[cfg(any(feature = "boa", feature = "js"))]
@@ -303,9 +303,9 @@ impl BrowserEngine {
                 .js_engine
                 .evaluate(script)
                 .map_err(|e| BrowserError::JsError(e))?;
-            return Ok(result);
+            Ok(result)
         }
-        #[cfg(not(feature = "js"))]
+        #[cfg(not(any(feature = "boa", feature = "js")))]
         {
             let _ = script;
             Ok("undefined".to_string())

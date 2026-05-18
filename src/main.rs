@@ -11,8 +11,6 @@
 use clap::Parser;
 use log::{error, info};
 use rust_browser::browser_process::host::BrowserProcessHost;
-use rust_browser::browser_process::interfaces::{InputEvent, RenderResultMessage};
-use rust_browser::task_queue::task::TaskTraits;
 use rust_browser::task_queue::GLOBAL_SCHEDULER;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -352,7 +350,7 @@ impl eframe::App for BrowserApp {
         // 加载进度条（显示在导航栏下方）
         if self.is_loading {
             egui::TopBottomPanel::top("loading_bar")
-                .min_height(4.0)
+                .min_size(4.0)
                 .show(ctx, |ui| {
                     ui.set_min_height(4.0);
                     let available_width = ui.available_width();
@@ -362,7 +360,7 @@ impl eframe::App for BrowserApp {
 
                     // 绘制进度条背景
                     let painter = ui.painter();
-                    let bar_rect = egui::Rect::from_min_size(
+                    let _bar_rect = egui::Rect::from_min_size(
                         egui::pos2(0.0, ui.cursor().min.y),
                         egui::vec2(available_width, 4.0),
                     );
