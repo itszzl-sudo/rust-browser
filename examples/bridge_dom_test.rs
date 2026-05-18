@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use rust_browser::bridge::WebNativeBridge;
+use rust_browser::bridge_impl::DefaultWebNativeBridge;
 
 #[derive(Parser)]
 #[command(name = "bridge_dom_test")]
@@ -33,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== bridge.rs DOM 渲染测试 ===\n");
 
     // 1. 创建桥接器
-    let mut bridge = WebNativeBridge::new(args.width, args.height);
+    let mut bridge = DefaultWebNativeBridge::new(args.width, args.height);
     println!("✓ 桥接器创建成功 ({}x{})", args.width, args.height);
 
     // ──────────────────────────────────────────────
@@ -155,16 +156,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- 渲染 ---");
 
     // 渲染前布局（应该为空）
-    println!("  渲染前布局节点数: {}", bridge.layout().len());
+    let all_rects = bridge.all_rects();
+    println!("  渲染前布局节点数: {}", all_rects.len());
 
     let png_data = bridge.render();
     println!("✓ 渲染完成！PNG 大小: {} 字节", png_data.len());
-    println!("  渲染后布局节点数: {}", bridge.layout().len());
-    println!("  布局是否为空: {}", bridge.layout().is_empty());
+    let all_rects = bridge.all_rects();
+    println!("  渲染后布局节点数: {}", all_rects.len());
 
     // 打印所有有 id 的元素
     println!("\n  所有带 id 的元素:");
-    for n in bridge.layout().get_all_layout_nodes() {
+    for n in &all_rects {
         if let Some(attr_id) = bridge.get_attr(n.dom_node, "id") {
             println!(
                 "    id='{}' dom={} tag={} pos=({:.0},{:.0})",
@@ -175,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 完整布局信息
     println!("\n  完整布局节点:");
-    let all_nodes = bridge.layout().get_all_layout_nodes();
+    let all_nodes = bridge.all_rects();
     // 先按 y 坐标排序
     let mut sorted: Vec<_> = all_nodes.iter().collect();
     sorted.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
@@ -189,7 +191,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let id_attr = bridge.get_attr(n.dom_node, "id").unwrap_or_default();
         let has_bg = n.background.is_some();
-        let has_fg = n.font_color.is_some();
         println!(
             "    {}[{}] id='{}' pos=({:.0},{:.0}) size=({:.0}x{:.0}) bg={} text=\"{}\"",
             n.tag_name, n.dom_node, id_attr, n.x, n.y, n.width, n.height, has_bg, text_preview
@@ -210,9 +211,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 8. 打印布局信息
     println!("\n--- 布局信息（前 20 个元素）---");
     let rects = bridge.all_rects();
-    for (i, (node_id, tag, x, y, w, h)) in rects.iter().take(20).enumerate() {
-        // 尝试获取文本内容
-        let text_preview = bridge.text(*node_id).unwrap_or_default();
+    for (i, n) in rects.iter().take(20).enumerate() {
+        let text_preview = bridge.text(n.dom_node).unwrap_or_default();
         let preview = if text_preview.len() > 40 {
             format!("{}...", &text_preview[..40])
         } else {
@@ -221,12 +221,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "  [{:>2}] {} (id={})  pos=({:.0},{:.0})  size=({:.0}x{:.0})  text=\"{}\"",
             i + 1,
-            tag,
-            node_id,
-            x,
-            y,
-            w,
-            h,
+            n.tag_name,
+            n.dom_node,
+            n.x,
+            n.y,
+            n.width,
+            n.height,
             preview
         );
     }
@@ -316,7 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n  模拟点击: {} ({:.0}, {:.0})", desc, x, y);
 
         // 先查看 hit_test 结果
-        if let Some(node) = bridge.layout().hit_test(*x, *y) {
+        if let Some(node) = bridge.hit_test(*x, *y) {
             println!(
                 "    hit_test 命中: {} dom={} pos=({:.0},{:.0}) size=({:.0}x{:.0})",
                 node.tag_name, node.dom_node, node.x, node.y, node.width, node.height
@@ -328,7 +328,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Some(id) = cur {
                 let tag = bridge.tag_name(id).unwrap_or_default();
                 print!("{}[{}] ", tag, id);
-                cur = bridge.dom().parent(id);
+                cur = bridge.parent_node(id);
             }
             println!();
 

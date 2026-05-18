@@ -38,6 +38,7 @@ pub mod renderer;
 pub mod task_queue;
 
 pub mod bridge;
+pub mod bridge_impl;
 
 pub use browser::{Browser, BrowserEngine, BrowserError, Document, DEFAULT_HOME_URL};
 pub use browser::{Tab, TabManager};
