@@ -65,7 +65,11 @@ impl ToCss for CssString {
     }
 }
 
-/// 预计算哈希：使用标准哈希
+/// 预计算哈希：使用稳定的哈希算法
+///
+/// 使用 `DefaultHasher` 在单进程内是确定性的。
+/// 注意：`selectors` crate 对 PrecomputedHash 的使用只用于同一进程内的匹配优化，
+/// 不需要跨进程一致性。
 fn compute_hash(s: &str) -> u32 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
@@ -608,6 +612,9 @@ pub fn element_matches_selector_list(
     matches_selector_list(selector_list, &element, &mut context)
 }
 
+/// 样式键：区分普通规则和 :hover 规则
+type StyleKey = String;
+
 /// 对文档中所有元素，根据 CSS 规则进行选择器匹配，返回按标签名分组的声明映射
 ///
 /// `rules`: 已解析的 CSS 规则
@@ -619,38 +626,15 @@ pub fn rules_to_style_map_with_selectors(rules: &[CssRule], doc_ref: &NodeRef) -
     // 分离 :hover 规则和普通规则
     let mut normal_rules: Vec<(SelectorList<KuchikiSelectorImpl>, &[super::Declaration])> =
         Vec::new();
-    let mut hover_rules: Vec<(String, Vec<super::Declaration>)> = Vec::new();
 
     for rule in rules {
-        if rule.selector.contains(":hover") {
-            // 对于 :hover 规则，提取标签名
-            // 支持的格式: "div:hover", "a:hover", "button:hover"
-            if let Some(tag) = rule.selector.trim().split(':').next() {
-                if !tag.is_empty() && !tag.contains(' ') && !tag.contains('.') && !tag.contains('#')
-                {
-                    hover_rules.push((format!("{}:hover", tag), rule.declarations.clone()));
-                } else {
-                    // 复杂选择器含 :hover，也尝试解析并添加到 map
-                    if let Ok(sel_list) = parse_selector(&rule.selector) {
-                        normal_rules.push((sel_list, rule.declarations.as_slice()));
-                    }
-                }
-            }
-        } else {
-            if let Ok(sel_list) = parse_selector(&rule.selector) {
-                normal_rules.push((sel_list, rule.declarations.as_slice()));
-            }
+        if let Ok(sel_list) = parse_selector(&rule.selector) {
+            normal_rules.push((sel_list, rule.declarations.as_slice()));
         }
     }
 
-    // 将 :hover 规则直接加入 map（按 tag:hover 键）
-    for (hover_key, decls) in &hover_rules {
-        map.entry(hover_key.clone())
-            .or_default()
-            .extend(decls.iter().cloned());
-    }
-
-    if normal_rules.is_empty() && hover_rules.is_empty() {
+    // 分离完成后没有规则则直接返回
+    if normal_rules.is_empty() {
         return map;
     }
 
@@ -665,15 +649,30 @@ pub fn rules_to_style_map_with_selectors(rules: &[CssRule], doc_ref: &NodeRef) -
             .map(|el| el.name.local.to_string())
             .unwrap_or_default();
 
-        // 对每个普通规则检查是否匹配
+        // 对每个规则检查是否匹配
         for (selector_list, decls) in &normal_rules {
             if element_matches_selector_list(&node, selector_list) {
-                map.entry(tag_name.clone())
-                    .or_default()
-                    .extend(decls.iter().cloned());
+                let key = style_key(tag_name.as_str(), selector_list);
+                map.entry(key).or_default().extend(decls.iter().cloned());
             }
         }
     }
 
     map
+}
+
+/// 根据选择器是否包含 :hover 生成不同的样式键
+fn style_key(tag_name: &str, selector_list: &SelectorList<KuchikiSelectorImpl>) -> StyleKey {
+    // 检查选择器中是否包含 :hover 伪类
+    // 简单判断：序列化选择器字符串并检查是否包含 ":hover"
+    // 注意：这里用 ToCss 序列化选择器来检查
+    let mut css_str = String::new();
+    use cssparser::ToCss;
+    let _ = selector_list.to_css(&mut css_str);
+
+    if css_str.contains(":hover") {
+        format!("{}:hover", tag_name)
+    } else {
+        tag_name.to_string()
+    }
 }

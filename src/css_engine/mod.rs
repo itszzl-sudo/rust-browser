@@ -8,6 +8,9 @@ pub mod selector;
 
 use std::collections::HashMap;
 
+/// 默认视口宽度（用于 @media 查询评估）
+pub(crate) const VIEWPORT_WIDTH: f32 = 1280.0;
+
 /// 单个 CSS 声明
 #[derive(Debug, Clone)]
 pub struct Declaration {
@@ -158,7 +161,6 @@ fn evaluate_media_condition(condition: &str) -> bool {
     // 移除开头的 @media
     let cond = trimmed
         .strip_prefix("@media")
-        .or_else(|| trimmed.strip_prefix("@media"))
         .map(|s| s.trim())
         .unwrap_or(trimmed);
 
@@ -205,9 +207,7 @@ fn evaluate_parenthesized_condition(cond: &str) -> bool {
     if let Some(value_str) = inner.strip_prefix("min-width:") {
         let value_str = value_str.trim();
         if let Some(px_value) = parse_length(value_str) {
-            // 我们使用 1280 作为默认视口宽度
-            // 这里简单判断：如果 min-width <= 1280，条件成立
-            return px_value <= 1280.0;
+            return px_value <= VIEWPORT_WIDTH;
         }
     }
 
@@ -215,7 +215,7 @@ fn evaluate_parenthesized_condition(cond: &str) -> bool {
     if let Some(value_str) = inner.strip_prefix("max-width:") {
         let value_str = value_str.trim();
         if let Some(px_value) = parse_length(value_str) {
-            return px_value >= 1280.0;
+            return px_value >= VIEWPORT_WIDTH;
         }
     }
 
@@ -254,21 +254,7 @@ pub fn rules_to_style_map(rules: &[CssRule], doc_ref: &kuchiki::NodeRef) -> Styl
 
 /// 解析内联 style 属性
 pub fn parse_inline_style(style_attr: &str) -> Vec<Declaration> {
-    let mut decls = Vec::new();
-    for part in style_attr.split(';') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some(colon) = part.find(':') {
-            let property = part[..colon].trim().to_string();
-            let value = part[colon + 1..].trim().to_string();
-            if !property.is_empty() {
-                decls.push(Declaration { property, value });
-            }
-        }
-    }
-    decls
+    parse_declarations(style_attr)
 }
 
 /// 从声明列表中获取指定属性的值
@@ -295,24 +281,12 @@ pub fn parse_length(value: &str) -> Option<f32> {
     }
 }
 
-/// 解析颜色
+/// 解析颜色（委托给 css::values::Color）
 pub fn parse_color(value: &str) -> Option<(u8, u8, u8)> {
     let v = value.trim();
     if v.starts_with('#') {
-        let hex = &v[1..];
-        match hex.len() {
-            3 => Some((
-                u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?,
-                u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?,
-                u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?,
-            )),
-            6 => Some((
-                u8::from_str_radix(&hex[0..2], 16).ok()?,
-                u8::from_str_radix(&hex[2..4], 16).ok()?,
-                u8::from_str_radix(&hex[4..6], 16).ok()?,
-            )),
-            _ => None,
-        }
+        let color = crate::css::values::Color::from_hex(v);
+        Some((color.r, color.g, color.b))
     } else {
         None
     }

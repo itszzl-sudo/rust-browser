@@ -257,7 +257,12 @@ pub trait WebNativeBridge {
     fn http_get(&mut self, url: &str) -> Result<crate::network::HttpResponse, String>;
 
     /// 发送 HTTP POST 请求
-    fn http_post(&mut self, url: &str, body: &[u8], content_type: &str) -> Result<crate::network::HttpResponse, String>;
+    fn http_post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        content_type: &str,
+    ) -> Result<crate::network::HttpResponse, String>;
 }
 
 // =========================================================================
@@ -512,6 +517,24 @@ mod tests {
         }
         fn viewport(&self) -> (u32, u32) {
             (self.width, self.height)
+        }
+
+        fn navigate(&mut self, _url: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn current_url(&self) -> String {
+            "about:blank".to_string()
+        }
+        fn http_get(&mut self, _url: &str) -> Result<crate::network::HttpResponse, String> {
+            Err("Mock: no network".to_string())
+        }
+        fn http_post(
+            &mut self,
+            _url: &str,
+            _body: &[u8],
+            _content_type: &str,
+        ) -> Result<crate::network::HttpResponse, String> {
+            Err("Mock: no network".to_string())
         }
     }
 
