@@ -1085,17 +1085,35 @@ impl<'a> TaffyRenderer<'a> {
             );
         }
 
-        // 读取 value 属性
+        // 读取 type/value/placeholder 属性
+        let input_type = node_ref
+            .and_then(|nr| {
+                nr.as_element()
+                    .and_then(|el| el.attributes.borrow().get("type").map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
         let value = node_ref
             .and_then(|nr| {
                 nr.as_element()
                     .and_then(|el| el.attributes.borrow().get("value").map(|s| s.to_string()))
             })
             .unwrap_or_default();
+        let placeholder = node_ref
+            .and_then(|nr| {
+                nr.as_element().and_then(|el| {
+                    el.attributes
+                        .borrow()
+                        .get("placeholder")
+                        .map(|s| s.to_string())
+                })
+            })
+            .unwrap_or_default();
 
+        let is_password = input_type == "password";
         let font_size = (h * 0.55).max(12.0).min(16.0);
         let padding = 8.0;
         let text_color = &Color::from_hex("#333333");
+        let placeholder_color = &Color::from_hex("#AAAAAA");
 
         // 渲染文本（左对齐，垂直居中）
         let text_x = x + padding;
@@ -1103,7 +1121,28 @@ impl<'a> TaffyRenderer<'a> {
         let max_width = w - padding * 2.0;
 
         if !value.is_empty() {
-            self.render_text_at(&value, text_x, text_y, max_width, font_size, text_color);
+            let display_text = if is_password {
+                "•".repeat(value.len())
+            } else {
+                value.clone()
+            };
+            self.render_text_at(
+                &display_text,
+                text_x,
+                text_y,
+                max_width,
+                font_size,
+                text_color,
+            );
+        } else if !placeholder.is_empty() && !is_focused {
+            self.render_text_at(
+                &placeholder,
+                text_x,
+                text_y,
+                max_width,
+                font_size,
+                placeholder_color,
+            );
         }
 
         // 聚焦时绘制光标
