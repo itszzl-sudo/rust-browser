@@ -77,6 +77,10 @@ pub struct TaffyLayoutNode {
     pub float_type: FloatType,
     /// CSS background-image URL
     pub background_image: Option<String>,
+    /// CSS background-position-x（px，负值表示 sprite 左移）
+    pub bg_position_x: f32,
+    /// CSS background-position-y（px，负值表示 sprite 上移）
+    pub bg_position_y: f32,
     /// CSS line-height（倍率，默认 1.375）
     pub line_height: f32,
 }
@@ -251,6 +255,8 @@ impl TaffyLayoutEngine {
                 position_type: self.determine_position_type(&merged_decls),
                 float_type: self.determine_float_type(&merged_decls),
                 background_image: self.determine_background_image(&merged_decls),
+                bg_position_x: Self::determine_bg_position(&merged_decls).0,
+                bg_position_y: Self::determine_bg_position(&merged_decls).1,
                 line_height: self.determine_line_height(&merged_decls),
             };
 
@@ -691,6 +697,69 @@ impl TaffyLayoutEngine {
         None
     }
 
+    /// 解析 background-position 值，返回 (x, y) 偏移（px）
+    /// CSS 语义：负值表示向左/向上移动 sprite，正值向右/向下
+    /// 返回的 (pos_x, pos_y) 即裁剪起点
+    fn determine_bg_position(decls: &[Declaration]) -> (f32, f32) {
+        // 优先使用 background-position
+        if let Some(bg_pos) = get_declaration(decls, "background-position") {
+            let parts: Vec<&str> = bg_pos.split_whitespace().collect();
+            let x = if !parts.is_empty() {
+                Self::parse_bg_position_val(parts[0])
+            } else {
+                0.0
+            };
+            let y = if parts.len() > 1 {
+                Self::parse_bg_position_val(parts[1])
+            } else {
+                0.0
+            };
+            return (x, y);
+        }
+        // 其次从 background 简写中提取位置
+        if let Some(bg) = get_declaration(decls, "background") {
+            let parts: Vec<&str> = bg.split_whitespace().collect();
+            // 在 background 简写中，位置通常在颜色和图片之后
+            for (i, part) in parts.iter().enumerate() {
+                if *part == "no-repeat"
+                    || part.starts_with("url")
+                    || part.starts_with('#')
+                    || Color::from_name(part).is_some()
+                {
+                    continue;
+                }
+                // 如果包含 px 或纯数字，可能是位置
+                if part.contains("px") || part.parse::<f32>().is_ok() {
+                    if let Some(px) = parse_length(part) {
+                        // 检查下一个 token 是否也是位置值
+                        if i + 1 < parts.len() {
+                            let next = parts[i + 1];
+                            if next.contains("px") || next.parse::<f32>().is_ok() {
+                                if let Some(py) = parse_length(next) {
+                                    return (px, py);
+                                }
+                            }
+                        }
+                        return (px, 0.0);
+                    }
+                }
+            }
+        }
+        (0.0, 0.0)
+    }
+
+    /// 解析单个 background-position 值
+    fn parse_bg_position_val(val: &str) -> f32 {
+        let v = val.trim();
+        match v {
+            "left" | "top" => return 0.0,
+            "center" => return -50.0, // 居中偏移
+            "right" | "bottom" => return -100.0,
+            _ => {}
+        }
+        parse_length(v).unwrap_or(0.0)
+    }
+
     /// 确定 position 类型
     fn determine_position_type(&self, decls: &[Declaration]) -> PositionType {
         if let Some(pos) = get_declaration(decls, "position") {
@@ -809,6 +878,18 @@ impl TaffyLayoutEngine {
     /// 返回处理的节点总数
     pub fn total_nodes_processed(&self) -> usize {
         self.total_node_count
+    }
+
+    /// 从 StyleMap 中查找指定标签的 box-shadow 声明
+    pub fn find_box_shadow_style(&self, tag: &str) -> Option<String> {
+        if let Some(decls) = self.style_map.get(tag) {
+            for d in decls {
+                if d.property == "box-shadow" {
+                    return Some(d.value.clone());
+                }
+            }
+        }
+        None
     }
 }
 

@@ -282,6 +282,82 @@ impl eframe::App for BrowserApp {
 
         ctx.set_visuals(egui::Visuals::dark());
 
+        // 顶部标签页栏 + URL 输入
+        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                // 显示所有标签页
+                if let Some(ref host) = self.browser_host {
+                    let renderer_ids = host.renderer_ids();
+                    for &tab_id in &renderer_ids {
+                        let is_active = Some(tab_id) == self.active_renderer_id;
+                        let label = if let Some(renderer) = host.get_renderer(tab_id) {
+                            if let Some(ref title) = renderer.title {
+                                format!("{}", title)
+                            } else {
+                                let url = &renderer.url;
+                                let short_url = url
+                                    .trim_start_matches("https://")
+                                    .trim_start_matches("http://")
+                                    .trim_end_matches('/');
+                                if short_url.is_empty() {
+                                    format!("标签 #{}", tab_id)
+                                } else {
+                                    format!("{} #{}", short_url, tab_id)
+                                }
+                            }
+                        } else {
+                            format!("标签 #{}", tab_id)
+                        };
+
+                        let btn = if is_active {
+                            ui.selectable_label(true, &label)
+                        } else {
+                            ui.selectable_label(false, &label)
+                        };
+
+                        if btn.clicked() && !is_active {
+                            add_log_message(format!("切换到标签页 #{}", tab_id));
+                            if let Some(ref mut host) = self.browser_host {
+                                host.switch_to_tab(tab_id);
+                                self.active_renderer_id = Some(tab_id);
+                                self.refresh_from_renderer();
+                            }
+                        }
+
+                        // 关闭标签页按钮（保留至少一个）
+                        if renderer_ids.len() > 1 {
+                            if ui.button("✕").clicked() {
+                                add_log_message(format!("关闭标签页 #{}", tab_id));
+                                if let Some(ref mut host) = self.browser_host {
+                                    host.close_renderer(tab_id);
+                                    self.active_renderer_id = host.active_renderer().map(|r| r.id);
+                                    self.refresh_from_renderer();
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                    }
+
+                    // 新建标签页按钮
+                    if ui.button("+").clicked() {
+                        add_log_message("新建空白标签页".to_string());
+                        if let Some(ref mut host) = self.browser_host {
+                            match host.spawn_renderer("about:blank", self.width, self.height) {
+                                Ok(new_id) => {
+                                    self.active_renderer_id = Some(new_id);
+                                    self.refresh_from_renderer();
+                                    add_log_message(format!("新标签页 #{} 已创建", new_id));
+                                }
+                                Err(e) => {
+                                    add_log_message(format!("创建标签页失败: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
         // 日志面板
         egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| {
             ui.heading("Chrome 多进程 IPC 日志");
@@ -327,7 +403,7 @@ impl eframe::App for BrowserApp {
                                     rust_browser::browser_process::interfaces::InputEvent::MouseClick {
                                         x: pos.x as f32,
                                         y: pos.y as f32,
-                                        button: 0, // 左键
+                                        button: 0,
                                     },
                                 );
                             }

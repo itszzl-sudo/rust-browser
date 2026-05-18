@@ -19,6 +19,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
 use thiserror::Error;
+use tiny_skia::Pixmap;
 
 #[derive(Error, Debug)]
 pub enum RenderError {
@@ -126,6 +127,8 @@ pub struct Renderer {
     title: Option<String>,
     /// 最近一次渲染的 Taffy 布局结果，用于点击测试
     last_taffy: Option<TaffyLayoutEngine>,
+    /// 超长截图的 PNG 缓存（完整页面高度）
+    page_png: Option<Vec<u8>>,
 }
 
 impl Renderer {
@@ -150,6 +153,7 @@ impl Renderer {
             document: None,
             title: None,
             last_taffy: None,
+            page_png: None,
         }
     }
 
@@ -230,13 +234,50 @@ impl Renderer {
             warn!("Taffy 布局计算失败: {}, 使用手动布局回退", e);
         }
 
-        // 5. 使用 Taffy 布局结果渲染
-        let mut renderer = TaffyRenderer {
-            painter: &mut self.painter,
-            taffy: &taffy,
-            dom,
+        // 4.1 计算页面总高度（超长截图）
+        let page_height = if !taffy.is_empty() {
+            let max_bottom = taffy
+                .get_all_layout_nodes()
+                .iter()
+                .map(|n| n.y + n.height)
+                .fold(0.0_f32, f32::max)
+                .max(height as f32);
+            (max_bottom + 50.0) as u32 // 加底部边距
+        } else {
+            height
         };
-        renderer.render_dom();
+
+        // 4.2 如果页面高度超过视口高度，创建完整页面大小的 pixmap
+        let orig_pixmap = self.painter.pixmap_mut().clone();
+        let is_tall = page_height > height;
+        if is_tall {
+            if let Some(page_pixmap) = Pixmap::new(width, page_height) {
+                *self.painter.pixmap_mut() = page_pixmap;
+                debug!("创建超长截图画布: {}x{}", width, page_height);
+            }
+        }
+
+        // 5. 使用 Taffy 布局结果渲染
+        {
+            // 先平铺白色背景（因为 pixmap 已重置）
+            self.painter.set_background(Color::WHITE);
+            self.painter.paint();
+
+            let mut renderer = TaffyRenderer {
+                painter: &mut self.painter,
+                taffy: &taffy,
+                dom,
+            };
+            renderer.render_dom();
+        }
+
+        // 5.1 生成完整页面 PNG 并缓存
+        if is_tall {
+            let full_png = self.painter.to_png();
+            self.page_png = Some(full_png);
+            // 恢复原始视口大小的 pixmap
+            *self.painter.pixmap_mut() = orig_pixmap;
+        }
 
         // 6. 保存布局结果，用于后续点击测试
         self.last_taffy = Some(taffy);
@@ -323,6 +364,11 @@ impl Renderer {
     /// 获取最近一次渲染的 Taffy 布局引擎引用
     pub fn taffy_layout(&self) -> Option<&TaffyLayoutEngine> {
         self.last_taffy.as_ref()
+    }
+
+    /// 获取超长截图的 PNG 数据（如有）
+    pub fn page_png(&self) -> Option<&[u8]> {
+        self.page_png.as_deref()
     }
 
     /// 对渲染后的页面做点击测试，返回点击位置的 <a> 链接 href
@@ -789,10 +835,37 @@ impl<'a> TaffyRenderer<'a> {
         }
     }
 
-    /// 查找标签的 box-shadow 定义（通过 taffy layout 中的样式）
-    fn find_box_shadow_for_tag(&self, _tag: &str) -> Option<BoxShadowValue> {
-        // 目前通过全局样式简化处理
-        // 后续可以扩展为从 TaffyLayoutEngine 的 StyleMap 中查找
+    /// 查找标签的 box-shadow 定义（从内联 style 和 taffy style_map 中查找）
+    fn find_box_shadow_for_tag(&self, tag: &str) -> Option<BoxShadowValue> {
+        // 1. 先检查布局节点对应的 DOM 元素的内联样式
+        let nodes = self.taffy.find_by_tag(tag);
+        for node in nodes {
+            if let Some(tag_node) = self.dom.get_node(node.dom_node) {
+                if let Some(el) = tag_node.as_element() {
+                    let attrs = el.attributes.borrow();
+                    if let Some(style) = attrs.get("style") {
+                        if let Some(shadow) = parse_box_shadow_from_style(style) {
+                            return Some(shadow);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. 从 TaffyLayoutEngine 的 StyleMap 中查找
+        if let Some(shadow_css) = self.taffy.find_box_shadow_style(tag) {
+            if let Some(shadow) = parse_box_shadow_from_style(&shadow_css) {
+                return Some(shadow);
+            }
+        }
+
+        // 3. 如果 tag 本身没匹配到，尝试查找通配选择器（*）的 box-shadow
+        if let Some(shadow_css) = self.taffy.find_box_shadow_style("*") {
+            if let Some(shadow) = parse_box_shadow_from_style(&shadow_css) {
+                return Some(shadow);
+            }
+        }
+
         None
     }
 
@@ -802,9 +875,76 @@ impl<'a> TaffyRenderer<'a> {
         cache.get(url)
     }
 
-    /// 渲染背景图片
-    fn render_background_image(&mut self, _tag: &str, _x: f32, _y: f32, _w: f32, _h: f32) {
-        // 预留：从 taffy layout 获取 background-image 并渲染
+    /// 渲染背景图片（支持 sprite 裁剪）
+    fn render_background_image(&mut self, _tag: &str, x: f32, y: f32, w: f32, h: f32) {
+        // 查找当前渲染树节点对应的布局
+        // 实际上在 render_tree_with_taffy 中已经通过 find_dom_index 获取了 layout
+        // 但为了简化，我们遍历所有布局节点查找匹配的元素
+
+        // 通过 tag 查找所有布局节点
+        let nodes = self.taffy.find_by_tag(_tag);
+        for layout in nodes {
+            if let Some(bg_image) = &layout.background_image {
+                let cache = global_image_cache();
+
+                // 如果有 background-position，使用 crop_sprite 裁剪
+                let bg_x = layout.bg_position_x as i32;
+                let bg_y = layout.bg_position_y as i32;
+
+                if bg_x != 0 || bg_y != 0 {
+                    // 使用 sprite 裁剪
+                    if let Some(cropped) =
+                        ImageCache::crop_sprite(bg_image, bg_x, bg_y, w as u32, h as u32)
+                    {
+                        self.painter.pixmap_mut().draw_pixmap(
+                            (x) as i32,
+                            (y) as i32,
+                            cropped.as_ref(),
+                            &tiny_skia::PixmapPaint::default(),
+                            tiny_skia::Transform::identity(),
+                            None,
+                        );
+                        return;
+                    }
+                }
+
+                // 无偏移或裁剪失败时，直接加载完整图片
+                if let Some(pixmap) = cache.get(bg_image) {
+                    // 缩放图片适配元素区域
+                    let img_w = pixmap.width() as f32;
+                    let img_h = pixmap.height() as f32;
+                    let scale_x = w / img_w;
+                    let scale_y = h / img_h;
+                    let scale = scale_x.min(scale_y).min(1.0); // 只缩小不放大
+
+                    if scale < 1.0 {
+                        // 缩放到元素区域 - 使用 draw_pixmap 的缩放变换
+                        let transform =
+                            tiny_skia::Transform::from_scale(scale, scale).post_translate(x, y);
+                        self.painter.pixmap_mut().draw_pixmap(
+                            x as i32,
+                            y as i32,
+                            pixmap.as_ref(),
+                            &tiny_skia::PixmapPaint::default(),
+                            transform,
+                            None,
+                        );
+                    } else {
+                        // 居中绘制
+                        let draw_x = x + (w - img_w) / 2.0;
+                        let draw_y = y + (h - img_h) / 2.0;
+                        self.painter.pixmap_mut().draw_pixmap(
+                            draw_x as i32,
+                            draw_y as i32,
+                            pixmap.as_ref(),
+                            &tiny_skia::PixmapPaint::default(),
+                            tiny_skia::Transform::identity(),
+                            None,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 使用 cosmic-text 渲染文本（支持 font_size 和 color 参数）

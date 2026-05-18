@@ -54,6 +54,8 @@ pub struct RendererChannel {
     pub result_binding: InterfaceBinding,
     /// 当前标签页 URL
     pub url: String,
+    /// 页面标题（从渲染结果中更新）
+    pub title: Option<String>,
     /// 视口宽度
     pub width: u32,
     /// 视口高度
@@ -142,6 +144,7 @@ impl BrowserProcessHost {
             input_remote: input_remote.bind(),
             result_binding: result_receiver.bind(),
             url: url.to_string(),
+            title: None,
             width,
             height,
         };
@@ -204,7 +207,16 @@ impl BrowserProcessHost {
         let id = self.active_tab_id?;
         let renderer = self.renderers.get(&id)?;
         if let Some(msg) = renderer.result_binding.try_receive() {
-            RenderResultMessage::from_message(&msg)
+            let result = RenderResultMessage::from_message(&msg);
+            // 更新标签页标题
+            if let Some(ref result) = result {
+                if let Some(ref title) = result.title {
+                    if let Some(channel) = self.renderers.get_mut(&id) {
+                        channel.title = Some(title.clone());
+                    }
+                }
+            }
+            result
         } else {
             None
         }
