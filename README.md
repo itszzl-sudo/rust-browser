@@ -4,189 +4,183 @@
 
 ## 核心特性
 
-- **Taffy 布局引擎** - CSS Flexbox/Grid 布局计算
-- **tiny-skia 渲染** - 高性能 2D 图形绘制
-- **Chrome 风格 UI** - 完整的标签页和地址栏界面
-- **多标签页支持** - 创建、切换、关闭标签页
-- **前进/后退功能** - 完整的浏览历史记录
+- **Taffy 布局引擎** - CSS Flexbox/Grid/Block/Inline/Position 布局计算
+- **完整 CSS 选择器** - 基于 selectors crate（Mozilla Servo），支持标签/类/ID/后代/属性/伪类
+- **tiny-skia 渲染** - 高性能 2D 图形绘制，支持 border、圆角、box-shadow
+- **cosmic-text 排版** - 支持 font-size、color、font-family，中文文本渲染
+- **网络图片加载** - 基于 reqwest + image crate 的异步图片下载与缓存
+- **CSS sprite 裁剪** - 支持 background-position 子图裁剪
+- **SVG 渲染** - 基于 resvg 的完整 SVG 支持
+- **JS 引擎** - 基于 obscura-js（deno_core/V8），完整 DOM API（document.querySelector 等）
+- **Web → Native 桥接** - WebNativeBridge，统一 DOM/CSS/JS/布局/渲染/事件 API
+- **点击测试** - hit_test + 事件 IPC，支持鼠标点击到元素的命中检测
+- **多进程架构** - Browser Process + Renderer Process 分离，Mojo IPC 通信
+- **Chrome 风格 UI** - 完整的标签页、地址栏、书签栏
+- **多标签页** - 创建、切换、关闭标签页
 - **HTTP 网络请求** - 加载网页内容
-- **CSS 解析** - 解析和应用样式
-- **DOM 树管理** - 文档对象模型
 - **截图功能** - 生成 PNG 图像
-- **双击运行** - 无需命令行参数，自动打开默认首页
-- **默认首页** - 自动加载百度首页 (https://www.baidu.com)
 
 ## 项目结构
 
 ```
 rust-browser/
-├── Cargo.toml           # 项目配置
-├── README.md            # 项目说明
+├── Cargo.toml                # 项目配置
+├── README.md                 # 项目说明
 ├── src/
-│   ├── main.rs          # 命令行入口
-│   ├── lib.rs           # 库入口
-│   ├── browser/         # 浏览器核心
-│   │   ├── mod.rs       # Browser 主类
-│   │   ├── engine.rs    # 浏览器引擎（HTTP 请求、文档解析）
-│   │   ├── page.rs      # 页面管理
-│   │   ├── tabs.rs      # 标签页管理
-│   │   └── ui.rs        # Chrome 风格 UI 绘制
-│   ├── css/             # CSS 处理
+│   ├── main.rs               # 命令行入口 / Chrome 风格 GUI
+│   ├── lib.rs                # 库入口
+│   ├── bridge.rs             # WebNativeBridge（Web → Native 桥接层）
+│   ├── browser/              # 浏览器核心
+│   │   ├── mod.rs            # Browser 主类
+│   │   ├── engine.rs         # 浏览器引擎（导航/JS执行/DOM管理）
+│   │   ├── page.rs           # 页面管理
+│   │   ├── tabs.rs           # 标签页管理
+│   │   └── ui.rs             # Chrome 风格 UI 绘制
+│   ├── browser_process/      # 浏览器进程（多进程）
+│   │   ├── host.rs           # BrowserProcessHost
+│   │   └── interfaces.rs     # Mojo IPC 接口定义
+│   ├── css/                  # CSS 值类型
 │   │   ├── mod.rs
-│   │   ├── parser.rs    # CSS 解析器
-│   │   ├── stylesheet.rs # 样式表、选择器
-│   │   └── values.rs    # CSS 值类型
-│   ├── dom/             # DOM 树
+│   │   ├── parser.rs
+│   │   ├── stylesheet.rs
+│   │   └── values.rs
+│   ├── css_engine/           # CSS 引擎（selectors crate 适配）
+│   │   ├── mod.rs            # CSS 解析 + 声明类型
+│   │   └── selector.rs       # 完整 CSS 选择器匹配
+│   ├── dom/                  # 旧版 DOM（过渡）
+│   ├── dom_obscura/          # obscura-dom 适配层
+│   ├── dom_wrapper.rs        # kuchiki DOM 包装器（主用）
+│   ├── html/                 # HTML 解析
+│   ├── js_engine.rs          # JS 引擎（obscura-js/V8）
+│   ├── network.rs            # HTTP 网络客户端
+│   ├── renderer/             # 渲染引擎
 │   │   ├── mod.rs
-│   │   ├── node.rs      # DOM 节点
-│   │   └── visitor.rs   # DOM 遍历
-│   └── renderer/        # 渲染引擎
-│       ├── mod.rs
-│       ├── renderer.rs   # 主渲染器
-│       ├── painter.rs   # tiny-skia 绘制
-│       ├── layout.rs    # Taffy 布局
-│       ├── context.rs   # 渲染上下文
-│       └── text.rs      # 文本处理
+│   │   ├── renderer.rs       # 主渲染器（TaffyRenderer）
+│   │   ├── taffy_layout.rs   # Taffy 布局引擎
+│   │   ├── border.rs         # border/box-shadow 绘制
+│   │   ├── image_cache.rs    # 网络图片加载/缓存
+│   │   ├── svg.rs            # resvg SVG 渲染
+│   │   ├── painter.rs        # tiny-skia 绘制
+│   │   ├── layout.rs         # 旧版布局（过渡）
+│   │   ├── context.rs        # 渲染上下文
+│   │   └── text.rs           # 文本处理
+│   ├── renderer_process/     # 渲染器进程
+│   ├── storage/              # 存储模块
+│   │   ├── cookie.rs         # Cookie 存储
+│   │   ├── history.rs        # 浏览历史
+│   │   └── local_storage.rs  # localStorage
+│   └── task_queue/           # 任务队列
 └── examples/
-    └── example.html     # 示例 HTML
+    ├── example.html           # 示例 HTML
+    ├── baidu_test.rs          # 渲染测试
+    └── web_test.rs            # 网页测试
 ```
 
-## Chrome 风格 UI 功能
+## 渲染管线
 
-### 标签页（Tabs）
-- 多标签页支持
-- 标签页标题显示
-- 新建标签页按钮
-- 关闭标签页按钮
-- 标签页切换
+```
+HTML → kuchiki DOM ─→ css_engine（selectors 0.27 完整选择器）
+                          ↓
+                    TaffyLayoutEngine → taffy（Block/Inline/Flex/Grid/Position）
+                          ↓
+                    TaffyLayoutNode[]  ← hit_test(x,y)
+                          ↓
+                    TaffyRenderer
+    ├─ cosmic-text（font-size/color/family）
+    ├─ border/box-shadow（tiny-skia）
+    ├─ ImageCache（reqwest + image）
+    ├─ resvg（SVG）
+    └─ text-decoration
+                          ↓
+              tiny-skia Pixmap → PNG
+```
 
-### 地址栏（Address Bar）
-- URL 显示
-- HTTPS 安全指示器（绿色锁图标）
-- 导航按钮：后退、前进、刷新、主页
-- 菜单按钮
+## WebNativeBridge API
 
-### 功能
-- **后退/前进** - 完整的浏览历史记录
-- **刷新** - 重新加载当前页面
-- **新建标签页** - 打开新标签页
-- **关闭标签页** - 关闭当前标签页
+供 web-to-native 工具产出的 Rust 代码直接调用：
+
+```rust
+use rust_browser::bridge::WebNativeBridge;
+
+let mut bridge = WebNativeBridge::new(1280, 720);
+
+// ① 写入 Vite 产物 DOM
+bridge.set_html(r#"<div id="app"><button id="btn">Click</button></div>"#);
+
+// ② 写入 CSS
+bridge.set_css("#btn { background: blue; border-radius: 8px; }");
+bridge.set_style("#btn", "color", "white");
+
+// ③ 执行 JS
+bridge.eval_js("console.log('hello')");
+
+// ④ 绑定事件到 Rust 回调
+bridge.on_click("#btn", |x, y| {
+    println!("按钮点击: {}, {}", x, y);
+});
+
+// ⑤ 渲染 → PNG
+let png: Vec<u8> = bridge.render();
+
+// ⑥ Rust 侧修改 DOM/CSS → 重新渲染
+bridge.set_style("#btn", "background", "red");
+let png2 = bridge.render();
+
+// ⑦ 获取元素位置
+let rect = bridge.get_rect("#btn");
+
+// ⑧ 点击测试
+bridge.handle_click(100.0, 200.0);
+```
+
+### API 完整清单
+
+| 类别 | 方法 | 说明 |
+|------|------|------|
+| DOM 读写 | `set_html`, `query`, `query_all`, `tag_name`, `get_attr`, `set_attr`, `text`, `query_text`, `get_rect`, `all_rects`, `hit_test` | |
+| CSS 操作 | `set_css`, `set_style`, `clear_css` | |
+| JS 执行 | `eval_js` | 需要 `--features js` |
+| 渲染 | `render` → `Vec<u8>` PNG | |
+| 事件绑定 | `on_click`, `on_form_submit`, `handle_click`, `handle_form_submit` | |
+| 工具 | `dom`, `dom_mut`, `renderer`, `layout`, `set_viewport`, `viewport` | |
 
 ## 依赖库
 
-- **taffy 0.4** - CSS 布局引擎
-- **tiny-skia 0.11** - 2D 渲染库
-- **reqwest** - HTTP 客户端
-- **image** - 图像处理
-- **log + env_logger** - 日志系统
-- **clap** - 命令行参数解析
-- **thiserror** - 错误处理
-
-## 使用方法
-
-### 双击运行（无需命令行）
-
-构建后直接双击可执行文件，将自动打开默认首页（百度）：
-
-```bash
-# 首先构建
-cargo build --release
-
-# 然后在 target/release/ 目录下找到 rust_browser.exe
-# 双击运行即可打开 https://www.baidu.com
-```
-
-### 基本用法
-
-```bash
-# 加载网页并截图
-cargo run -- "https://example.com" --output screenshot.png
-
-# 加载本地 HTML 文件
-cargo run -- "examples/example.html" --output local_screenshot.png
-
-# 自定义视口尺寸
-cargo run -- "https://example.com" --width 1920 --height 1080
-
-# 启用调试模式
-cargo run -- "https://example.com" --debug
-```
-
-### 命令行参数
-
-- `url` - URL 或本地 HTML 文件路径（默认：https://www.baidu.com）
-- `--output, -o` - 输出文件路径（用于截图）
-- `--width` - 视口宽度（默认：1280）
-- `--height` - 视口高度（默认：720）
-- `--debug, -d` - 启用调试模式
-
-## Rust API 示例
-
-```rust
-use rust_browser::Browser;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 创建浏览器实例
-    let mut browser = Browser::new()?;
-    
-    // 设置视口
-    browser = browser.with_viewport(1280, 720);
-    
-    // 导航到 URL
-    browser.navigate("https://example.com")?;
-    
-    // 打印页面信息
-    if let Some(title) = browser.title() {
-        println!("页面标题: {}", title);
-    }
-    println!("当前 URL: {}", browser.url());
-    
-    // 保存截图
-    browser.screenshot("output.png")?;
-    
-    Ok(())
-}
-```
-
-### 多标签页操作
-
-```rust
-use rust_browser::Browser;
-
-// 创建新标签页
-browser.new_tab()?;
-
-// 切换标签页
-browser.switch_to_tab(0);
-
-// 关闭标签页
-browser.close_tab()?;
-
-// 后退
-browser.go_back()?;
-
-// 前进
-browser.go_forward()?;
-
-// 刷新
-browser.reload()?;
-```
+| 库 | 版本 | 用途 |
+|---|------|------|
+| taffy | 0.10（本地） | CSS 布局引擎 |
+| tiny-skia | 0.12（本地） | 2D 渲染 |
+| cosmic-text | 0.19（本地） | 文本排版 |
+| kuchiki | 0.12（本地） | HTML 解析 |
+| selectors | 0.27 | CSS 选择器 |
+| cssparser | 0.35 | CSS 语法解析 |
+| resvg | 0.47 | SVG 渲染 |
+| reqwest | 0.12 | HTTP 客户端 |
+| image | 0.25 | 图片解码 |
+| obscura-js | 本地 | JS 引擎（V8/deno_core） |
+| obscura-dom | 本地 | DOM 树 |
+| eframe/egui | 0.34 | GUI 窗口 |
 
 ## 构建
 
 ```bash
-# Debug 构建
+# 标准构建
 cargo build
 
-# Release 构建
-cargo build --release
+# 带 JS 引擎构建
+cargo build --features js
 
-# 运行测试
+# 测试
 cargo test
 
-# 检查代码
-cargo check
+# 渲染相关测试
+cargo test -- image_cache border svg taffy renderer text css_engine bridge
+
+# 百度渲染测试
+cargo run --example baidu_test
 ```
+
+当前状态：渲染相关测试 **34/34 通过**，全量测试 **99/103 通过**（4 个 storage/IPC 测试失败，与渲染无关）。
 
 ## 许可证
 

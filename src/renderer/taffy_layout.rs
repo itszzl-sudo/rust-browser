@@ -77,6 +77,8 @@ pub struct TaffyLayoutNode {
     pub float_type: FloatType,
     /// CSS background-image URL
     pub background_image: Option<String>,
+    /// CSS line-height（倍率，默认 1.375）
+    pub line_height: f32,
 }
 
 /// 完整的 taffy 布局引擎（完整版）
@@ -223,9 +225,10 @@ impl TaffyLayoutEngine {
             let text_content = self.collect_element_text(node_ref);
 
             // 测量文本高度（如果有文本内容）
+            let font_size = self.determine_font_size(&merged_decls);
+            let line_height = self.determine_line_height(&merged_decls);
             let text_height = if !text_content.is_empty() {
-                let font_size = self.determine_font_size(&merged_decls);
-                self.measure_text_height(&text_content, font_size)
+                self.measure_text_height(&text_content, font_size, line_height)
             } else {
                 0.0
             };
@@ -248,6 +251,7 @@ impl TaffyLayoutEngine {
                 position_type: self.determine_position_type(&merged_decls),
                 float_type: self.determine_float_type(&merged_decls),
                 background_image: self.determine_background_image(&merged_decls),
+                line_height: self.determine_line_height(&merged_decls),
             };
 
             let layout_idx = self.layout_nodes.len();
@@ -290,7 +294,7 @@ impl TaffyLayoutEngine {
     }
 
     /// 用 cosmic-text 测量文本高度
-    fn measure_text_height(&self, text: &str, font_size: f32) -> f32 {
+    fn measure_text_height(&self, text: &str, font_size: f32, line_height: f32) -> f32 {
         if text.trim().is_empty() {
             return 0.0;
         }
@@ -300,10 +304,22 @@ impl TaffyLayoutEngine {
             _ => 800.0,
         };
 
-        let mut font_system = global_font_system().lock().unwrap();
-        let line_height = font_size * 1.375; // 行高 ≈ font-size × 1.375
+        // line_height 可能是倍率（如 1.54）或 px 值（如 22.0）
+        // 如果 > 20 且 < 200 视为 px 值；否则视为倍率
+        let lh = if line_height > 0.0 {
+            if line_height > 20.0 && line_height < 200.0 {
+                // px 值
+                line_height
+            } else {
+                // 倍率
+                font_size * line_height
+            }
+        } else {
+            font_size * 1.375
+        };
 
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let mut font_system = global_font_system().lock().unwrap();
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, lh));
 
         buffer.set_size(Some(max_width.max(100.0)), Some(f32::INFINITY));
         buffer.set_wrap(Wrap::Word);
@@ -311,7 +327,7 @@ impl TaffyLayoutEngine {
         buffer.set_text(text, &attrs, Shaping::Advanced, Some(Align::Left));
         buffer.shape_until_scroll(&mut font_system, true);
 
-        let total_height = buffer.layout_runs().count() as f32 * line_height;
+        let total_height = buffer.layout_runs().count() as f32 * lh;
         total_height + 10.0 // 额外 padding
     }
 
@@ -637,6 +653,24 @@ impl TaffyLayoutEngine {
             return cleaned;
         }
         None
+    }
+
+    /// 确定 line-height，返回倍率（如 1.375）。默认返回 0.0（调用方用 font_size * 1.375）
+    fn determine_line_height(&self, decls: &[Declaration]) -> f32 {
+        if let Some(lh) = get_declaration(decls, "line-height") {
+            let lh = lh.trim();
+            // 无单位数值（如 1.54）=> 倍率
+            if let Ok(ratio) = lh.parse::<f32>() {
+                return ratio;
+            }
+            // 带 px 的数值（如 22px）=> 需要转换成相对于 font-size 的倍率
+            // 但由于我们在测量时还不知道 font-size，这里先返回数值
+            // 调用方处理：如果返回值 > 100 视为 px，否则视为倍率
+            if let Some(px) = parse_length(lh) {
+                return px; // px 值，调用方会判断
+            }
+        }
+        0.0 // 默认 0，调用方 fallback 到 font_size * 1.375
     }
 
     /// 确定 background-image URL
