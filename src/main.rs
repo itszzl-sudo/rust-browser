@@ -6,8 +6,9 @@
 //! - Mojo IPC 通信
 //! - Task Queue 任务调度
 
+#![cfg_attr(not(feature = "gui"), allow(dead_code, unused_imports))]
+
 use clap::Parser;
-use eframe::egui;
 use log::{error, info};
 use rust_browser::browser_process::host::BrowserProcessHost;
 use rust_browser::browser_process::interfaces::{InputEvent, RenderResultMessage};
@@ -503,6 +504,7 @@ fn run_screenshot_mode(args: &Args) -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "gui")]
 fn main() -> Result<(), eframe::Error> {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
