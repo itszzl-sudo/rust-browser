@@ -815,13 +815,14 @@ impl<'a> TaffyRenderer<'a> {
                             let default_color = Color::from_hex("#333333");
                             let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
                             let padding = 10.0;
-                            self.render_text_at(
+                            self.render_text_at_weight(
                                 &text_content,
                                 x + padding,
                                 y + padding,
                                 w - padding * 2.0,
                                 font_size,
                                 font_color,
+                                layout.font_weight,
                             );
                         }
                     }
@@ -857,13 +858,14 @@ impl<'a> TaffyRenderer<'a> {
                                         let font_color =
                                             layout.font_color.as_ref().unwrap_or(&default_color);
                                         let padding = 10.0;
-                                        self.render_text_at(
+                                        self.render_text_at_weight(
                                             trimmed,
                                             layout.x + padding,
                                             layout.y + padding,
                                             layout.width - padding * 2.0,
                                             font_size,
                                             font_color,
+                                            layout.font_weight,
                                         );
                                     }
                                 }
@@ -1295,8 +1297,7 @@ impl<'a> TaffyRenderer<'a> {
         }
     }
 
-    /// 使用 cosmic-text 渲染文本（支持 font_size 和 color 参数）
-    /// 支持 font-family 备选链
+    /// 使用 cosmic-text 渲染文本
     fn render_text_at(
         &mut self,
         text: &str,
@@ -1305,6 +1306,21 @@ impl<'a> TaffyRenderer<'a> {
         max_width: f32,
         font_size: f32,
         color: &Color,
+    ) {
+        self.render_text_at_weight(text, x, y, max_width, font_size, color, 400)
+    }
+
+    /// 使用 cosmic-text 渲染文本（完整参数）
+    #[allow(dead_code)]
+    fn render_text_at_weight(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        max_width: f32,
+        font_size: f32,
+        color: &Color,
+        font_weight: u16,
     ) {
         let trimmed = text.trim();
         if trimmed.is_empty() || font_size <= 0.0 {
@@ -1321,7 +1337,7 @@ impl<'a> TaffyRenderer<'a> {
 
         buffer.set_size(Some(max_width.max(50.0)), Some(f32::INFINITY));
         buffer.set_wrap(Wrap::Word);
-        let attrs = Attrs::new();
+        let attrs = Attrs::new().weight(cosmic_text::Weight(font_weight));
         buffer.set_text(trimmed, &attrs, Shaping::Advanced, Some(Align::Left));
         buffer.shape_until_scroll(&mut font_system, true);
 

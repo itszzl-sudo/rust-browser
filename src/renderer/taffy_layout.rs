@@ -83,6 +83,8 @@ pub struct TaffyLayoutNode {
     pub bg_position_y: f32,
     /// CSS line-height（倍率，默认 1.375）
     pub line_height: f32,
+    /// CSS font-weight（400=normal, 700=bold）
+    pub font_weight: u16,
 }
 
 /// 完整的 taffy 布局引擎（完整版）
@@ -277,6 +279,7 @@ impl TaffyLayoutEngine {
                 bg_position_x: Self::determine_bg_position(&merged_decls).0,
                 bg_position_y: Self::determine_bg_position(&merged_decls).1,
                 line_height: self.determine_line_height(&merged_decls),
+                font_weight: self.determine_font_weight(&merged_decls),
             };
 
             let layout_idx = self.layout_nodes.len();
@@ -498,44 +501,180 @@ impl TaffyLayoutEngine {
             }
         }
 
+        // 辅助：从长度字符串构建 LengthPercentage
+        let to_lp = |s: &str| -> LengthPercentage {
+            if let Some(px) = parse_length(s) {
+                if s.contains('%') {
+                    LengthPercentage::from_percent(px / 100.0)
+                } else {
+                    LengthPercentage::from_length(px)
+                }
+            } else {
+                LengthPercentage::ZERO
+            }
+        };
+
+        // 辅助：从长度字符串构建 LengthPercentageAuto
+        let to_lpa = |s: &str| -> LengthPercentageAuto {
+            if s == "auto" {
+                return auto();
+            }
+            if let Some(px) = parse_length(s) {
+                if s.contains('%') {
+                    percent(px / 100.0)
+                } else {
+                    length(px)
+                }
+            } else {
+                auto()
+            }
+        };
+
+        // 辅助：解析 Rect 值（1~4个值，用于 padding = LengthPercentage）
+        let parse_rect_lp = |val: &str| -> Option<Rect<LengthPercentage>> {
+            let parts: Vec<&str> = val.split_whitespace().collect();
+            if parts.is_empty() {
+                return None;
+            }
+            let lp_from = |s: &str| {
+                if let Some(px) = parse_length(s) {
+                    if s.contains('%') {
+                        LengthPercentage::from_percent(px / 100.0)
+                    } else {
+                        LengthPercentage::from_length(px)
+                    }
+                } else {
+                    LengthPercentage::ZERO
+                }
+            };
+            match parts.len() {
+                1 => {
+                    let v = lp_from(parts[0]);
+                    Some(Rect {
+                        left: v,
+                        right: v,
+                        top: v,
+                        bottom: v,
+                    })
+                }
+                2 => {
+                    let v1 = lp_from(parts[0]);
+                    let v2 = lp_from(parts[1]);
+                    Some(Rect {
+                        left: v2,
+                        right: v2,
+                        top: v1,
+                        bottom: v1,
+                    })
+                }
+                3 => {
+                    let v1 = lp_from(parts[0]);
+                    let v2 = lp_from(parts[1]);
+                    let v3 = lp_from(parts[2]);
+                    Some(Rect {
+                        left: v2,
+                        right: v2,
+                        top: v1,
+                        bottom: v3,
+                    })
+                }
+                4 => Some(Rect {
+                    top: lp_from(parts[0]),
+                    right: lp_from(parts[1]),
+                    bottom: lp_from(parts[2]),
+                    left: lp_from(parts[3]),
+                }),
+                _ => None,
+            }
+        };
+
+        // 辅助：解析 Rect 值（1~4个值，用于 margin = LengthPercentageAuto）
+        let parse_rect = |val: &str| -> Option<Rect<LengthPercentageAuto>> {
+            let parts: Vec<&str> = val.split_whitespace().collect();
+            if parts.is_empty() {
+                return None;
+            }
+            match parts.len() {
+                1 => {
+                    let v = to_lpa(parts[0]);
+                    Some(Rect {
+                        left: v,
+                        right: v,
+                        top: v,
+                        bottom: v,
+                    })
+                }
+                2 => {
+                    let v1 = to_lpa(parts[0]);
+                    let v2 = to_lpa(parts[1]);
+                    Some(Rect {
+                        left: v2,
+                        right: v2,
+                        top: v1,
+                        bottom: v1,
+                    })
+                }
+                3 => {
+                    let v1 = to_lpa(parts[0]);
+                    let v2 = to_lpa(parts[1]);
+                    let v3 = to_lpa(parts[2]);
+                    Some(Rect {
+                        left: v2,
+                        right: v2,
+                        top: v1,
+                        bottom: v3,
+                    })
+                }
+                4 => Some(Rect {
+                    top: to_lpa(parts[0]),
+                    right: to_lpa(parts[1]),
+                    bottom: to_lpa(parts[2]),
+                    left: to_lpa(parts[3]),
+                }),
+                _ => None,
+            }
+        };
+
         // 解析 margin
         if let Some(m) = get_declaration(decls, "margin") {
-            let parts: Vec<&str> = m.split_whitespace().collect();
-            if parts.len() == 1 {
-                if let Some(px) = parse_length(parts[0]) {
-                    let mval = if parts[0].contains('%') {
-                        percent(px / 100.0)
-                    } else {
-                        length(px)
-                    };
-                    style.margin = Rect {
-                        left: mval,
-                        right: mval,
-                        top: mval,
-                        bottom: mval,
-                    };
-                }
+            if let Some(rect) = parse_rect(&m) {
+                style.margin = rect;
             }
+        }
+
+        // 解析 margin-left/margin-right/margin-top/margin-bottom
+        if let Some(v) = get_declaration(decls, "margin-left") {
+            style.margin.left = to_lpa(&v);
+        }
+        if let Some(v) = get_declaration(decls, "margin-right") {
+            style.margin.right = to_lpa(&v);
+        }
+        if let Some(v) = get_declaration(decls, "margin-top") {
+            style.margin.top = to_lpa(&v);
+        }
+        if let Some(v) = get_declaration(decls, "margin-bottom") {
+            style.margin.bottom = to_lpa(&v);
         }
 
         // 解析 padding
         if let Some(p) = get_declaration(decls, "padding") {
-            let parts: Vec<&str> = p.split_whitespace().collect();
-            if parts.len() == 1 {
-                if let Some(px) = parse_length(parts[0]) {
-                    let pval = if parts[0].contains('%') {
-                        percent(px / 100.0)
-                    } else {
-                        length(px)
-                    };
-                    style.padding = Rect {
-                        left: pval,
-                        right: pval,
-                        top: pval,
-                        bottom: pval,
-                    };
-                }
+            if let Some(rect) = parse_rect_lp(&p) {
+                style.padding = rect;
             }
+        }
+
+        // 解析 padding-left/right/top/bottom
+        if let Some(v) = get_declaration(decls, "padding-left") {
+            style.padding.left = to_lp(&v);
+        }
+        if let Some(v) = get_declaration(decls, "padding-right") {
+            style.padding.right = to_lp(&v);
+        }
+        if let Some(v) = get_declaration(decls, "padding-top") {
+            style.padding.top = to_lp(&v);
+        }
+        if let Some(v) = get_declaration(decls, "padding-bottom") {
+            style.padding.bottom = to_lp(&v);
         }
 
         // 解析 flex-direction
@@ -644,6 +783,58 @@ impl TaffyLayoutEngine {
             }
         }
 
+        // 解析 min-width / min-height（使用已有的 length/percent/auto 函数）
+        let to_dim_val = |s: &str| -> Dimension {
+            if s == "auto" {
+                return auto();
+            }
+            if let Some(px) = parse_length(s) {
+                if s.contains('%') {
+                    percent(px / 100.0)
+                } else {
+                    length(px)
+                }
+            } else {
+                auto()
+            }
+        };
+        if let Some(v) = get_declaration(decls, "min-width") {
+            style.min_size.width = to_dim_val(&v);
+        }
+        if let Some(v) = get_declaration(decls, "min-height") {
+            style.min_size.height = to_dim_val(&v);
+        }
+        if let Some(v) = get_declaration(decls, "max-width") {
+            style.max_size.width = to_dim_val(&v);
+        }
+        if let Some(v) = get_declaration(decls, "max-height") {
+            style.max_size.height = to_dim_val(&v);
+        }
+
+        // overflow 暂不支持（taffy 0.10 中无此类型）
+
+        // 解析 border-width（简化为所有边统一）
+        if let Some(v) = get_declaration(decls, "border-width") {
+            if let Some(px) = parse_length(&v) {
+                style.border = Rect::length(px);
+            }
+        }
+        if let Some(v) = get_declaration(decls, "border") {
+            // border 简写中提取宽度
+            for part in v.split_whitespace() {
+                if let Some(px) = parse_length(part) {
+                    style.border = Rect::length(px);
+                    break;
+                }
+            }
+        }
+
+        // 解析 white-space
+        if let Some(v) = get_declaration(decls, "white-space") {
+            // nowrap 暂不处理（taffy 0.10 中无对应类型）
+            let _ = v;
+        }
+
         // 解析 text-align
         if let Some(ta) = get_declaration(decls, "text-align") {
             match ta.as_str() {
@@ -745,6 +936,24 @@ impl TaffyLayoutEngine {
     fn determine_font_color(&self, decls: &[Declaration]) -> Option<Color> {
         // 优先使用 color 属性作为字体颜色
         self.determine_color(decls)
+    }
+
+    /// 确定 font-weight
+    fn determine_font_weight(&self, decls: &[Declaration]) -> u16 {
+        if let Some(fw) = get_declaration(decls, "font-weight") {
+            match fw.trim() {
+                "normal" => return 400,
+                "bold" => return 700,
+                "bolder" => return 700,
+                "lighter" => return 300,
+                _ => {
+                    if let Ok(n) = fw.trim().parse::<u16>() {
+                        return n.clamp(100, 900);
+                    }
+                }
+            }
+        }
+        400
     }
 
     /// 确定 font-family（返回备选链，按优先级排序）
