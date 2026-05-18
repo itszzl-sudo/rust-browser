@@ -4,6 +4,7 @@
 
 pub mod border;
 pub mod context;
+pub mod cursor;
 pub mod image_cache;
 pub mod layout;
 pub mod painter;

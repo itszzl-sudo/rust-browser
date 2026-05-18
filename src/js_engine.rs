@@ -56,6 +56,15 @@ impl JsEngine {
     pub fn is_ready(&self) -> bool {
         self.runtime.is_some()
     }
+
+    /// 在指定节点上触发 JS 事件（通过 dispatchEvent）
+    pub fn dispatch_event(&mut self, node_id: u32, event_type: &str) -> Result<String, String> {
+        let js = format!(
+            "(() => {{ try {{ document.getElementById('{}')?.dispatchEvent(new Event('{}')); return 'ok'; }} catch(e) {{ return `err:${{e.message}}`; }} }})()",
+            node_id, event_type
+        );
+        self.evaluate(&js)
+    }
 }
 
 impl Default for JsEngine {

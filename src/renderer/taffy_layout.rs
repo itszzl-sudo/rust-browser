@@ -103,6 +103,8 @@ pub struct TaffyLayoutEngine {
     total_node_count: usize,
     /// 当前 hover 的 dom 节点索引
     pub hovered_node: Option<usize>,
+    /// 当前 focused 的 dom 节点索引
+    pub focused_node: Option<usize>,
 }
 
 impl TaffyLayoutEngine {
@@ -127,6 +129,7 @@ impl TaffyLayoutEngine {
             style_map: StyleMap::new(),
             total_node_count: 0,
             hovered_node: None,
+            focused_node: None,
         }
     }
 
@@ -875,6 +878,21 @@ impl TaffyLayoutEngine {
         self.hovered_node = dom_node;
     }
 
+    /// 设置 focused 节点
+    pub fn set_focused_node(&mut self, dom_node: Option<usize>) {
+        self.focused_node = dom_node;
+    }
+
+    /// 获取 focused 节点
+    pub fn get_focused_node(&self) -> Option<usize> {
+        self.focused_node
+    }
+
+    /// 检查指定 dom 节点是否具有焦点
+    pub fn is_focused(&self, dom_node: usize) -> bool {
+        self.focused_node == Some(dom_node)
+    }
+
     /// 获取 dom → layout 映射
     pub fn dom_to_layout_map(&self) -> &HashMap<usize, usize> {
         &self.dom_to_layout
@@ -899,6 +917,7 @@ impl TaffyLayoutEngine {
         self.style_map.clear();
         self.total_node_count = 0;
         self.hovered_node = None;
+        self.focused_node = None;
     }
 
     /// 返回处理的节点总数

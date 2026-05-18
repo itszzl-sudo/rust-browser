@@ -277,6 +277,57 @@ impl eframe::App for BrowserApp {
             self.refresh_from_renderer();
         }
 
+        // 处理键盘事件
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                {
+                    // 只在 Ctrl 未按下时处理（避免冲突）
+                    if !modifiers.ctrl && !modifiers.meta {
+                        let key_str = match key {
+                            egui::Key::Backspace => "Backspace".to_string(),
+                            egui::Key::Enter => "Enter".to_string(),
+                            egui::Key::Tab => "Tab".to_string(),
+                            egui::Key::Space => " ".to_string(),
+                            egui::Key::ArrowLeft => "ArrowLeft".to_string(),
+                            egui::Key::ArrowRight => "ArrowRight".to_string(),
+                            egui::Key::ArrowUp => "ArrowUp".to_string(),
+                            egui::Key::ArrowDown => "ArrowDown".to_string(),
+                            egui::Key::Escape => "Escape".to_string(),
+                            egui::Key::Delete => "Delete".to_string(),
+                            // 其他按键映射到字符
+                            _ => {
+                                if let Some(c) = key.to_char() {
+                                    // 如果 Shift 按下，尝试大写；否则小写
+                                    if modifiers.shift {
+                                        c.to_uppercase().to_string()
+                                    } else {
+                                        c.to_lowercase().to_string()
+                                    }
+                                } else {
+                                    return; // 跳过无法映射的键
+                                }
+                            }
+                        };
+
+                        if let Some(ref host) = self.browser_host {
+                            add_log_message(format!("键盘输入: {}", key_str));
+                            let _ = host.send_input(
+                                rust_browser::browser_process::interfaces::InputEvent::KeyPress {
+                                    key: key_str,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
         // 在每一帧运行 TaskQueue 的 main thread 任务
         GLOBAL_SCHEDULER.run_main_tasks();
 

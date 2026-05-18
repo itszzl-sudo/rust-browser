@@ -378,8 +378,28 @@ fn run_renderer_process(
                         debug!("Renderer #{} MouseClick at ({:.1}, {:.1})", id, x, y);
 
                         // hit testing：在渲染器的布局结果中查找点击位置对应的元素
-                        if let Some(doc) = &renderer.document() {
+                        // 注意：必须先 clone document，因为 focus_by_click 需要 &mut renderer
+                        let doc_clone = renderer.document().cloned();
+                        if let Some(ref doc) = doc_clone {
                             let dom = doc.get_dom();
+
+                            // 新增：点击 <input>/<textarea> 时设置焦点
+                            if let Some(focused) = renderer.focus_by_click(x, y, dom) {
+                                info!("焦点元素: {:?}", focused);
+                                // 焦点变化后重新渲染
+                                let (w, h) = renderer.context().viewport();
+                                if let Ok(png) = renderer.render_to_png() {
+                                    let title = renderer.title().map(|t| t.to_string());
+                                    let result = RenderResultMessage {
+                                        png_data: png,
+                                        width: w,
+                                        height: h,
+                                        title,
+                                    };
+                                    let _ = result_proxy.send_message(result.to_message());
+                                }
+                            }
+
                             if let Some(href) = renderer.hit_test_link(x, y, dom) {
                                 info!("Renderer #{} 点击链接: {} -> 导航", id, href);
                                 // 处理相对 URL
@@ -465,6 +485,67 @@ fn run_renderer_process(
                                             title,
                                         };
                                         let _ = result_proxy.send_message(result.to_message());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "KeyPress" => {
+                    let key = String::from_utf8_lossy(&msg.data).to_string();
+                    debug!("Renderer #{} KeyPress: '{}'", id, key);
+
+                    // 处理按键：更新焦点元素的 value
+                    // 先 clone document，因为 render() 需要 &mut renderer
+                    let doc_clone = renderer.document().cloned();
+                    if let Some(ref doc) = doc_clone {
+                        let dom = doc.get_dom();
+                        if let Some(focused) = renderer.focused_node {
+                            let tag = dom.tag_name(focused).unwrap_or_default();
+                            if tag == "input" || tag == "textarea" {
+                                let mut value = dom.attribute(focused, "value").unwrap_or_default();
+
+                                match key.as_str() {
+                                    "Backspace" => {
+                                        value.pop();
+                                    }
+                                    "Enter" => {
+                                        if tag == "textarea" {
+                                            value.push('\n');
+                                        }
+                                        // 单行 input 的 Enter 可触发表单提交（暂不实现）
+                                    }
+                                    _ => {
+                                        // 只接受可打印字符（单字符按键）
+                                        if key.len() == 1 {
+                                            value.push_str(&key);
+                                        }
+                                    }
+                                }
+
+                                dom.set_attribute(focused, "value", &value);
+
+                                // 更新渲染器的光标
+                                renderer.cursor.reset(value.len());
+                                renderer.last_key_time = 0.0;
+
+                                // 重新渲染
+                                let title = renderer.title().map(|t| t.to_string());
+                                let (w, h) = renderer.context().viewport();
+                                // clone doc 再传给 render，避免借用冲突
+                                let doc_for_render = doc.clone();
+                                match renderer.render(&Some(doc_for_render)) {
+                                    Ok(png) => {
+                                        let result = RenderResultMessage {
+                                            png_data: png,
+                                            width: w,
+                                            height: h,
+                                            title,
+                                        };
+                                        let _ = result_proxy.send_message(result.to_message());
+                                    }
+                                    Err(e) => {
+                                        warn!("按键后重新渲染失败: {:?}", e);
                                     }
                                 }
                             }

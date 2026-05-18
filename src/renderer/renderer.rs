@@ -131,6 +131,12 @@ pub struct Renderer {
     page_png: Option<Vec<u8>>,
     /// 是否正在加载
     pub is_loading: bool,
+    /// 当前获得焦点的 DOM 元素索引
+    pub focused_node: Option<usize>,
+    /// 光标渲染器
+    pub cursor: crate::renderer::cursor::CursorRenderer,
+    /// 上次按键时间（秒，用于光标重置计时）
+    pub last_key_time: f32,
 }
 
 impl Renderer {
@@ -157,6 +163,9 @@ impl Renderer {
             last_taffy: None,
             page_png: None,
             is_loading: false,
+            focused_node: None,
+            cursor: crate::renderer::cursor::CursorRenderer::new(),
+            last_key_time: 0.0,
         }
     }
 
@@ -399,6 +408,51 @@ impl Renderer {
     /// 获取超长截图的 PNG 数据（如有）
     pub fn page_png(&self) -> Option<&[u8]> {
         self.page_png.as_deref()
+    }
+
+    /// 点击测试：如果点到 <input>/<textarea> 则设置焦点
+    pub fn focus_by_click(&mut self, x: f32, y: f32, dom: &DomWrapper) -> Option<usize> {
+        // 先从 taffy 中获取点击命中的节点
+        let hit_dom_node = {
+            let taffy = self.last_taffy.as_ref()?;
+            let hit = taffy.hit_test(x, y)?;
+            hit.dom_node
+        };
+
+        let tag = dom.tag_name(hit_dom_node).unwrap_or_default();
+        if tag == "input" || tag == "textarea" {
+            self.focused_node = Some(hit_dom_node);
+            // 更新 taffy 布局引擎中的 focused_node
+            if let Some(ref mut taffy) = self.last_taffy {
+                taffy.set_focused_node(Some(hit_dom_node));
+            }
+            // 重置光标到文本末尾
+            let value = dom.attribute(hit_dom_node, "value").unwrap_or_default();
+            self.cursor.reset(value.len());
+            return Some(hit_dom_node);
+        }
+
+        // 点击非输入元素时，清除焦点
+        if self.focused_node.is_some() {
+            self.focused_node = None;
+            if let Some(ref mut taffy) = self.last_taffy {
+                taffy.set_focused_node(None);
+            }
+        }
+
+        None
+    }
+
+    /// 每帧更新光标闪烁状态
+    pub fn update_cursor(&mut self, dt: f32) {
+        self.cursor.update(dt);
+    }
+
+    /// 获取焦点元素的 value 值
+    pub fn get_focused_value(&self) -> Option<String> {
+        let focused = self.focused_node?;
+        let doc = self.document.as_ref()?;
+        doc.get_dom().attribute(focused, "value")
     }
 
     /// 对渲染后的页面做点击测试，返回点击位置的 <a> 链接 href
@@ -800,7 +854,7 @@ impl<'a> TaffyRenderer<'a> {
         y: f32,
         w: f32,
         h: f32,
-        _node_ref: Option<&NodeRef>,
+        node_ref: Option<&NodeRef>,
     ) {
         match tag {
             "hr" => {
@@ -810,6 +864,12 @@ impl<'a> TaffyRenderer<'a> {
             "img" => {
                 // 图片占位符背景 - 仅在未加载成功时显示
                 self.render_img_placeholder(x, y, w, h);
+            }
+            "input" => {
+                self.render_input_element(x, y, w, h, node_ref);
+            }
+            "textarea" => {
+                self.render_textarea_element(x, y, w, h, node_ref);
             }
             _ => {}
         }
@@ -853,6 +913,126 @@ impl<'a> TaffyRenderer<'a> {
         let center_y = y + h / 2.0 - 10.0;
         self.painter
             .draw_rect(center_x, center_y, 40.0, 20.0, &Color::from_hex("#cccccc"));
+    }
+
+    /// 渲染 <input> 元素（单行文本输入框）
+    fn render_input_element(&mut self, x: f32, y: f32, w: f32, h: f32, node_ref: Option<&NodeRef>) {
+        // 白色背景
+        self.painter.draw_rect(x, y, w, h, &Color::WHITE);
+        // 灰色 1px 边框
+        self.painter
+            .draw_rect_border(x, y, w, h, 1.0, &Color::from_hex("#888888"));
+
+        // 读取 value 属性
+        let value = node_ref
+            .and_then(|nr| {
+                nr.as_element()
+                    .and_then(|el| el.attributes.borrow().get("value").map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
+
+        let font_size = 14.0;
+        let padding = 4.0;
+        let text_color = &Color::from_hex("#333333");
+
+        // 渲染文本（左对齐，垂直居中）
+        let text_x = x + padding;
+        let text_y = y + (h - font_size) / 2.0;
+        let max_width = w - padding * 2.0;
+
+        if !value.is_empty() {
+            self.render_text_at(&value, text_x, text_y, max_width, font_size, text_color);
+        }
+
+        // 判断是否有焦点
+        let is_focused = self.is_node_focused(node_ref);
+
+        if is_focused {
+            // 在文本末尾绘制竖线光标（始终可见，简化版本）
+            let cursor_x = text_x + value.len() as f32 * (font_size * 0.6).min(8.0);
+            self.painter
+                .draw_rect(cursor_x, y + 2.0, 2.0, h - 4.0, &Color::from_hex("#333333"));
+        }
+    }
+
+    /// 判断指定节点是否获得焦点
+    fn is_node_focused(&self, node_ref: Option<&NodeRef>) -> bool {
+        let taffy_focused = self.taffy.focused_node;
+        node_ref
+            .and_then(|nr| {
+                let rc_ptr = Rc::as_ptr(&nr.0) as usize;
+                self.dom
+                    .inner_document()
+                    .descendants()
+                    .position(|n| Rc::as_ptr(&n.0) as usize == rc_ptr)
+                    .and_then(|dom_idx| {
+                        if taffy_focused == Some(dom_idx) {
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .is_some()
+    }
+
+    /// 渲染 <textarea> 元素（多行文本输入框）
+    fn render_textarea_element(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        node_ref: Option<&NodeRef>,
+    ) {
+        // 白色背景
+        self.painter.draw_rect(x, y, w, h, &Color::WHITE);
+        // 灰色 1px 边框
+        self.painter
+            .draw_rect_border(x, y, w, h, 1.0, &Color::from_hex("#888888"));
+
+        // 读取 value 属性或直接子文本
+        let value = node_ref
+            .and_then(|nr| {
+                nr.as_element()
+                    .and_then(|el| el.attributes.borrow().get("value").map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| {
+                // 如果没有 value 属性，使用 text_content_recursive
+                node_ref.map(|nr| collect_text(&nr)).unwrap_or_default()
+            });
+
+        let font_size = 14.0;
+        let padding = 4.0;
+        let text_color = &Color::from_hex("#333333");
+
+        // 渲染文本（左对齐，多行）
+        let text_x = x + padding;
+        let text_y = y + padding;
+        let max_width = w - padding * 2.0;
+
+        if !value.is_empty() {
+            self.render_text_at(&value, text_x, text_y, max_width, font_size, text_color);
+        }
+
+        // 判断焦点状态并渲染光标
+        let is_focused = self.is_node_focused(node_ref);
+
+        if is_focused {
+            // 简单光标：在文本末尾
+            let line_height = font_size * 1.375;
+            let num_lines = value.lines().count().max(1);
+            let cursor_x_val = text_x
+                + (value.lines().last().unwrap_or("").len() as f32) * (font_size * 0.6).min(8.0);
+            let cursor_y = text_y + (num_lines - 1) as f32 * line_height;
+            self.painter.draw_rect(
+                cursor_x_val,
+                cursor_y,
+                2.0,
+                font_size * 1.2,
+                &Color::from_hex("#333333"),
+            );
+        }
     }
 
     /// 渲染元素的 box-shadow
