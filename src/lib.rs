@@ -38,6 +38,7 @@ pub mod storage;
 pub mod task_queue;
 
 pub mod html;
+pub mod loader;
 
 pub mod bridge;
 

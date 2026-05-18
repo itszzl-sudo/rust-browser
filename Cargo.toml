@@ -52,6 +52,7 @@ url = "2.5"
 
 resvg = { version = "0.47", default-features = false, features = [] }
 usvg = { version = "0.47", default-features = false, features = [] }
+regex = "1.11"
 
 image = { version = "0.25.1", features = ["png", "jpeg", "gif", "webp", "bmp"] }
 brotli = "7.0"
