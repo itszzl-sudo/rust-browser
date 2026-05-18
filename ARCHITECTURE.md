@@ -540,11 +540,11 @@ bridge.handle_click(100.0, 200.0);
 
 | 缺失能力 | 说明 | 链路断裂点 |
 |---------|------|-----------|
-| `border-radius` | painter 已实现绘制，但 `taffy_layout` 未解析 CSS 值 | 布局层未将 radius 传递给渲染器 |
-| `border-color` / `border-style` | 仅支持 border-width，颜色和样式未独立解析 | `determine_style` 未解析 |
-| `box-shadow` | painter 已实现，但仅通过 `StyleMap` 间接传递 | 未在 `determine_style` 中直接解析 |
-| `background-size` / `background-repeat` | 背景图片已加载，但尺寸和重复模式未处理 | 图片渲染未控制缩放/平铺 |
-| `text-decoration` | 完全未实现 | 渲染器无装饰线绘制 |
+| `border-radius` | ✅ 已修复 | `determine_style` + painter 圆角绘制 |
+| `border-color` / `border-style` | ✅ 已修复 | 独立解析 + 渲染器边框绘制 |
+| `box-shadow` | ✅ 已修复 | 内联/CSS规则解析 + 渲染 |
+| `background-size` | ✅ 已修复 | cover/contain/auto 缩放 |
+| `text-decoration` | ✅ 已修复 | underline/line-through 绘制 |
 | `text-transform` | 完全未实现 | 无大小写转换 |
 | `letter-spacing` / `word-spacing` | 完全未实现 | cosmic-text `Attrs` 未设置 |
 | `outline` | 完全未实现 | 无轮廓线绘制 |
@@ -601,14 +601,11 @@ storage::local_storage::tests::test_used_bytes_tracking
 
 | 工作 | 说明 | 预估 |
 |------|------|------|
-| `<input type="password">` | 密码圆点字符 | 0.3d |
-| `<input placeholder>` | 占位符文本 | 0.3d |
 | `<li>` 列表数字/字母 | list-style-type: decimal/alpha | 1d |
-| `border-radius` CSS 解析 | 从 CSS 提取 border-radius 传入 painter | 0.5d |
-| `border-color` / `border-style` | 边框颜色和样式独立于宽度控制 | 0.5d |
-| `box-shadow` CSS 解析 | 在 `determine_style` 中直接解析 box-shadow | 0.3d |
-| `background-size` / `background-repeat` | 控制背景图片缩放和平铺 | 0.5d |
-| `text-decoration` | 下划线/删除线渲染 | 0.5d |
+| `background-repeat` | 背景图片平铺模式 | 0.3d |
+| `text-transform` | 大小写转换 | 0.3d |
+| `letter-spacing` / `word-spacing` | 字间距/词间距 | 0.3d |
+| `outline` | 轮廓线 | 0.3d |
 
 ### 中期（3-10 天）
 
