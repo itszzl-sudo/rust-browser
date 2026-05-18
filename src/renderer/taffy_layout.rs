@@ -279,7 +279,28 @@ impl TaffyLayoutEngine {
             }
 
             // 确定样式
-            let style = self.determine_style(&tag_name, &merged_decls);
+            let mut style = self.determine_style(&tag_name, &merged_decls);
+
+            // 收集直接文本子节点内容
+            let text_content = self.collect_element_text(node_ref);
+
+            // 测量文本高度，如果 content 有文本且 style 没有显式设置高度，则用文本高度
+            let font_size = self.determine_font_size(&merged_decls);
+            let line_height = self.determine_line_height(&merged_decls);
+            let text_height = if !text_content.is_empty() {
+                self.measure_text_height(&text_content, font_size, line_height)
+            } else {
+                0.0
+            };
+            // 如果 taffy style 没指定高度，但有文本内容，用文本高度
+            if text_height > 0.0 {
+                // 如果 style 没有显式设高度（auto 或 0），用文本高度
+                let is_auto = style.size.height == auto();
+                let is_zero = style.size.height == length(0.0);
+                if is_auto || is_zero {
+                    style.size.height = length(text_height);
+                }
+            }
 
             let taffy_node = self
                 .taffy
@@ -289,18 +310,6 @@ impl TaffyLayoutEngine {
             self.taffy
                 .add_child(parent_node, taffy_node)
                 .map_err(|e| format!("添加子节点 {} 失败: {}", tag_name, e))?;
-
-            // 收集直接文本子节点内容
-            let text_content = self.collect_element_text(node_ref);
-
-            // 测量文本高度（如果有文本内容）
-            let font_size = self.determine_font_size(&merged_decls);
-            let line_height = self.determine_line_height(&merged_decls);
-            let text_height = if !text_content.is_empty() {
-                self.measure_text_height(&text_content, font_size, line_height)
-            } else {
-                0.0
-            };
 
             // 创建布局节点
             let layout_node = TaffyLayoutNode {
