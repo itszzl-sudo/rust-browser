@@ -4,30 +4,27 @@
 
 ## 核心特性
 
-- **Taffy 布局引擎** - CSS Flexbox/Grid/Block/Inline/Position 布局计算
+- **Taffy 布局引擎** - CSS Flexbox/Grid/Block/Inline 布局计算
 - **完整 CSS 选择器** - 基于 selectors crate（Mozilla Servo），支持标签/类/ID/后代/属性/伪类
 - **tiny-skia 渲染** - 高性能 2D 图形绘制，支持 border、圆角、box-shadow
 - **cosmic-text 排版** - 支持 font-size、color、font-family，中文文本渲染
-- **网络图片加载** - 基于 reqwest + image crate 的异步图片下载与缓存
-- **CSS sprite 裁剪** - 支持 background-position 子图裁剪
-- **SVG 渲染** - 基于 resvg 的完整 SVG 支持
-- **JS 引擎** - 基于 obscura-js（deno_core/V8），完整 DOM API（document.querySelector 等）
+- **网络图片加载** - 基于 reqwest + image crate 的图片下载与缓存
+- **长页面截图** - 自动检测页面高度，输出完整 PNG（不限于视口）
+- **JS 引擎** - 支持 Boa（纯 Rust，默认）和 obscura-js（V8/deno_core）双后端
 - **Web → Native 桥接** - WebNativeBridge，统一 DOM/CSS/JS/布局/渲染/事件 API
-- **点击测试** - hit_test + 事件 IPC，支持鼠标点击到元素的命中检测
+- **事件冒泡** - 点击事件沿 DOM 树向上冒泡，命中任意祖先匹配的处理器
+- **headless 模式** - 无 GUI/JS/首页加载，纯 CLI 渲染与测试
 - **多进程架构** - Browser Process + Renderer Process 分离，Mojo IPC 通信
-- **Chrome 风格 UI** - 完整的标签页、地址栏、书签栏
-- **多标签页** - 创建、切换、关闭标签页
-- **HTTP 网络请求** - 加载网页内容
-- **截图功能** - 生成 PNG 图像
+- **Chrome 风格 GUI** - 标签页、地址栏（可选，通过 `gui` feature）
 
 ## 项目结构
 
 ```
 rust-browser/
-├── Cargo.toml                # 项目配置
+├── Cargo.toml                # 项目配置（features: boa/js/gui/headless）
 ├── README.md                 # 项目说明
 ├── src/
-│   ├── main.rs               # 命令行入口 / Chrome 风格 GUI
+│   ├── main.rs               # GUI 入口（Chrome 风格窗口，需要 gui feature）
 │   ├── lib.rs                # 库入口
 │   ├── bridge.rs             # WebNativeBridge（Web → Native 桥接层）
 │   ├── browser/              # 浏览器核心
@@ -36,112 +33,128 @@ rust-browser/
 │   │   ├── page.rs           # 页面管理
 │   │   ├── tabs.rs           # 标签页管理
 │   │   └── ui.rs             # Chrome 风格 UI 绘制
-│   ├── browser_process/      # 浏览器进程（多进程）
+│   ├── browser_process/      # 多进程 IPC
 │   │   ├── host.rs           # BrowserProcessHost
 │   │   └── interfaces.rs     # Mojo IPC 接口定义
 │   ├── css/                  # CSS 值类型
-│   │   ├── mod.rs
-│   │   ├── parser.rs
-│   │   ├── stylesheet.rs
-│   │   └── values.rs
 │   ├── css_engine/           # CSS 引擎（selectors crate 适配）
-│   │   ├── mod.rs            # CSS 解析 + 声明类型
-│   │   └── selector.rs       # 完整 CSS 选择器匹配
-│   ├── dom/                  # 旧版 DOM（过渡）
-│   ├── dom_obscura/          # obscura-dom 适配层
-│   ├── dom_wrapper.rs        # kuchiki DOM 包装器（主用）
-│   ├── html/                 # HTML 解析
-│   ├── js_engine.rs          # JS 引擎（obscura-js/V8）
-│   ├── network.rs            # HTTP 网络客户端
+│   ├── dom_wrapper.rs        # kuchiki DOM 包装器
+│   ├── js_engine.rs          # JS 引擎（Boa / obscura-js）
+│   ├── network.rs            # HTTP 网络客户端（reqwest）
 │   ├── renderer/             # 渲染引擎
-│   │   ├── mod.rs
-│   │   ├── renderer.rs       # 主渲染器（TaffyRenderer）
-│   │   ├── taffy_layout.rs   # Taffy 布局引擎
+│   │   ├── renderer.rs       # 主渲染器（支持长页面截图）
+│   │   ├── taffy_layout.rs   # Taffy 布局引擎（绝对坐标）
 │   │   ├── border.rs         # border/box-shadow 绘制
 │   │   ├── image_cache.rs    # 网络图片加载/缓存
-│   │   ├── svg.rs            # resvg SVG 渲染
 │   │   ├── painter.rs        # tiny-skia 绘制
-│   │   ├── layout.rs         # 旧版布局（过渡）
 │   │   ├── context.rs        # 渲染上下文
-│   │   └── text.rs           # 文本处理
-│   ├── renderer_process/     # 渲染器进程
-│   ├── storage/              # 存储模块
-│   │   ├── cookie.rs         # Cookie 存储
-│   │   ├── history.rs        # 浏览历史
-│   │   └── local_storage.rs  # localStorage
+│   │   ├── text.rs           # cosmic-text 排版
+│   │   └── cursor.rs         # 光标渲染
+│   ├── mojo/                 # Mojo IPC 管道
 │   └── task_queue/           # 任务队列
 └── examples/
-    ├── example.html           # 示例 HTML
-    ├── baidu_test.rs          # 渲染测试
-    └── web_test.rs            # 网页测试
+    ├── bridge_dom_test.rs     # bridge 渲染 + 事件测试（headless）
+    ├── baidu_test.rs          # 百度渲染测试
+    ├── web_test.rs            # 网页能力测试
+    └── example.html           # 示例 HTML
 ```
 
 ## 渲染管线
 
 ```
-HTML → kuchiki DOM ─→ css_engine（selectors 0.27 完整选择器）
+HTML → kuchiki DOM ─→ css_engine（selectors 完整选择器）
                           ↓
-                    TaffyLayoutEngine → taffy（Block/Inline/Flex/Grid/Position）
+                    TaffyLayoutEngine → taffy（Block/Flex/Grid）
+                          ↓  （相对坐标 → 绝对坐标）
+                    TaffyLayoutNode[]  ← hit_test(x,y) 事件冒泡
                           ↓
-                    TaffyLayoutNode[]  ← hit_test(x,y)
-                          ↓
-                    TaffyRenderer
-    ├─ cosmic-text（font-size/color/family）
+                    TaffyRenderer（通过 `render_with_taffy`）
+    ├─ cosmic-text（font-size/color/family，跳过 style/script）
     ├─ border/box-shadow（tiny-skia）
     ├─ ImageCache（reqwest + image）
-    ├─ resvg（SVG）
-    └─ text-decoration
+    └─ 长页面截图画布（自动扩展）
                           ↓
-              tiny-skia Pixmap → PNG
+              tiny-skia Pixmap → PNG（完整页面）
+```
+
+## Feature 矩阵
+
+| feature | 默认 | 说明 |
+|---------|------|------|
+| `boa` | ✅ | Boa JS 引擎（纯 Rust） |
+| `js` | | obscura-js（V8/deno_core） |
+| `gui` | ✅ | GUI 窗口（eframe/egui） |
+| `headless` | | 无 GUI/JS/首页加载，纯渲染核心（隐含 `boa`） |
+
+> `boa` 和 `js` 互斥，`headless` 不依赖任何 JS 引擎。
+
+```bash
+# 默认构建（Boa JS + GUI）
+cargo build
+
+# headless 模式（服务器端渲染/自动化测试）
+cargo build --lib --no-default-features --features headless
+
+# 运行 bridge DOM 测试（headless）
+cargo run --example bridge_dom_test --no-default-features --features headless
+
+# GUI 模式
+cargo run
+
+# 指定 URL
+cargo run -- "https://www.baidu.com"
 ```
 
 ## WebNativeBridge API
 
-供 web-to-native 工具产出的 Rust 代码直接调用：
+供 web-to-native 工具产出的 Rust 代码直接调用。完整示例见 `examples/bridge_dom_test.rs`。
 
 ```rust
 use rust_browser::bridge::WebNativeBridge;
 
 let mut bridge = WebNativeBridge::new(1280, 720);
 
-// ① 写入 Vite 产物 DOM
-bridge.set_html(r#"<div id="app"><button id="btn">Click</button></div>"#);
+// ① 写入 DOM
+bridge.set_html(r#"<div id="app"><button id="btn">点击</button></div>"#);
 
 // ② 写入 CSS
 bridge.set_css("#btn { background: blue; border-radius: 8px; }");
 bridge.set_style("#btn", "color", "white");
 
-// ③ 执行 JS
+// ③ 执行 JS（需要 boa/js feature）
 bridge.eval_js("console.log('hello')");
 
-// ④ 绑定事件到 Rust 回调
-bridge.on_click("#btn", |x, y| {
-    println!("按钮点击: {}, {}", x, y);
-});
+// ④ 绑定事件 → Rust 回调
+bridge.on_click("#btn", Box::new(|x, y| {
+    println!("按钮点击: ({:.0}, {:.0})", x, y);
+}));
 
-// ⑤ 渲染 → PNG
+// ⑤ 渲染 → PNG（长页面自动扩展）
 let png: Vec<u8> = bridge.render();
 
-// ⑥ Rust 侧修改 DOM/CSS → 重新渲染
+// ⑥ 修改样式 → 重新渲染
 bridge.set_style("#btn", "background", "red");
 let png2 = bridge.render();
 
 // ⑦ 获取元素位置
-let rect = bridge.get_rect("#btn");
+if let Some((x, y, w, h)) = bridge.get_rect("#btn") {
+    println!("按钮位置: ({:.0},{:.0}) {:.0}x{:.0}", x, y, w, h);
+}
 
-// ⑧ 点击测试
+// ⑧ 模拟点击（事件冒泡）
 bridge.handle_click(100.0, 200.0);
 ```
 
-### API 完整清单
+### API 清单
 
 | 类别 | 方法 | 说明 |
 |------|------|------|
-| DOM 读写 | `set_html`, `query`, `query_all`, `tag_name`, `get_attr`, `set_attr`, `text`, `query_text`, `get_rect`, `all_rects`, `hit_test` | |
-| CSS 操作 | `set_css`, `set_style`, `clear_css` | |
-| JS 执行 | `eval_js` | 需要 `--features js` |
-| 渲染 | `render` → `Vec<u8>` PNG | |
-| 事件绑定 | `on_click`, `on_form_submit`, `handle_click`, `handle_form_submit` | |
+| DOM | `set_html`, `query`, `query_all`, `tag_name`, `get_attr`, `set_attr`, `text`, `query_text` | |
+| 布局 | `get_rect`, `all_rects`, `hit_test` | 绝对坐标 |
+| CSS | `set_css`, `set_style`, `clear_css` | |
+| JS | `eval_js` | 需 `boa`/`js` feature |
+| 渲染 | `render` → `Vec<u8>` | 自动长页面 |
+| 事件 | `on_click`, `on_form_submit`, `handle_click`, `handle_form_submit` | 冒泡机制 |
 | 工具 | `dom`, `dom_mut`, `renderer`, `layout`, `set_viewport`, `viewport` | |
 
 ## 依赖库
@@ -154,51 +167,32 @@ bridge.handle_click(100.0, 200.0);
 | kuchiki | 0.12（本地） | HTML 解析 |
 | selectors | 0.27 | CSS 选择器 |
 | cssparser | 0.35 | CSS 语法解析 |
-| resvg | 0.47 | SVG 渲染 |
 | reqwest | 0.12 | HTTP 客户端 |
 | image | 0.25 | 图片解码 |
-| boa_engine | 0.21 | JS 引擎（纯 Rust，默认） |
-| obscura-js | 本地 | JS 引擎（V8/deno_core，可选） |
-| obscura-dom | 本地 | DOM 树（仅 obscura-js 使用） |
-| regex | 1.11 | 预扫描 HTML |
-| eframe/egui | 0.34 | GUI 窗口（可选） |
+| boa_engine | 0.21 | JS 引擎（纯 Rust） |
+| eframe/egui | 0.34 | GUI 窗口 |
 
-## 构建
-
-## Feature 矩阵
-
-| feature | 说明 |
-|---------|------|
-| `boa`（默认） | Boa JS 引擎（纯 Rust，0 原生依赖） |
-| `js` | obscura-js（V8/deno_core） |
-| `gui`（默认） | GUI 窗口（eframe/egui） |
-
-> `boa` 和 `js` 互斥，不能同时启用。
+## 测试
 
 ```bash
-# 默认构建（Boa JS + GUI）
-cargo build
-
-# 调试模式（opt-level=1，平衡编译速度和运行性能）
-cargo build --profile dev
-
-# 无 GUI 纯 lib 构建
-cargo check -p rust-browser --lib --no-default-features
-
-# V8 JS 引擎构建
-cargo build --features js,gui
-
-# 测试
-cargo test
-
-# 渲染相关测试
-cargo test -- image_cache border svg taffy renderer text css_engine bridge
+# bridge DOM 渲染 + 事件冒泡测试（推荐）
+cargo run --example bridge_dom_test --no-default-features --features headless
 
 # 百度渲染测试
 cargo run --example baidu_test
+
+# 网页加载测试
+cargo run --example web_test
 ```
 
-当前状态：渲染相关测试 **34/34 通过**，全量测试 **107/111 通过**（4 个 storage/IPC 测试失败，与渲染无关）。
+`bridge_dom_test` 输出 `bridge_dom_test_output.png`，包含：
+- 蓝色头栏（标题 + 副标题）
+- 颜色色块（红/绿/蓝方块 + 橙/紫圆形，水平排列）
+- 文本渲染测试（中英文混排 + 引用块）
+- 表格三栏布局
+- 按钮 + 链接交互测试
+- 深色页脚
+- 事件冒泡验证（点击任意子元素冒泡到父容器）
 
 ## 许可证
 
