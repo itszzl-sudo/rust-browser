@@ -209,7 +209,6 @@ impl BrowserProcessHost {
 
         if let Some(msg) = renderer.result_binding.try_receive() {
             let result = RenderResultMessage::from_message(&msg);
-            // 更新标签页标题
             if let Some(ref result) = result {
                 if let Some(ref title) = result.title {
                     if let Some(channel) = self.renderers.get_mut(&id) {
@@ -218,6 +217,43 @@ impl BrowserProcessHost {
                 }
             }
             result
+        } else {
+            None
+        }
+    }
+
+    /// 接收 RGBA 渲染结果（优先于 PNG 方案）
+    pub fn try_receive_rgba_result(&mut self) -> Option<RenderResultRgba> {
+        let id = self.active_tab_id?;
+        let renderer = self.renderers.get(&id)?;
+
+        if let Some(msg) = renderer.result_binding.try_receive() {
+            if msg.name == "FramePaintedRGBA" {
+                let result = RenderResultRgba::from_message(&msg);
+                if let Some(ref result) = result {
+                    if let Some(ref title) = result.title {
+                        if let Some(channel) = self.renderers.get_mut(&id) {
+                            channel.title = Some(title.clone());
+                        }
+                    }
+                }
+                return result;
+            }
+            // 如果是旧的 PNG 格式，回退
+            let result = RenderResultMessage::from_message(&msg);
+            if let Some(ref result) = result {
+                if let Some(ref title) = result.title {
+                    if let Some(channel) = self.renderers.get_mut(&id) {
+                        channel.title = Some(title.clone());
+                    }
+                }
+            }
+            result.map(|r| RenderResultRgba {
+                rgba_data: r.png_data,
+                width: r.width,
+                height: r.height,
+                title: r.title,
+            })
         } else {
             None
         }
@@ -323,22 +359,20 @@ fn run_renderer_process(
         // 第二步：加载文档 + 渲染（耗时操作）
         match load_document(&current_url) {
             Ok(doc) => {
-                // 保存文档到渲染器，后续点击/事件需要访问
+                // 保存文档到渲染器
                 let title = doc.title.clone();
-                // 先把 document 移入渲染器，再通过渲染器的 document() 方法获取不可变引用
                 renderer.set_document(doc);
-                // 注意：不能 clone document（DomWrapper 的 clone 会创建空树）
-                // render() 接受 &Option<Document>，所以传 self.document 的引用
-                match renderer.render_to_png() {
-                    Ok(png) => {
-                        let result = RenderResultMessage {
-                            png_data: png,
-                            width,
-                            height,
+                // 优先使用 RGBA 路径（省掉 PNG 编解码）
+                match renderer.render_to_rgba() {
+                    Ok((w, h, rgba)) => {
+                        let result = RenderResultRgba {
+                            rgba_data: rgba,
+                            width: w,
+                            height: h,
                             title,
                         };
                         let _ = result_proxy.send_message(result.to_message());
-                        info!("Renderer #{} 首次渲染完成", id);
+                        info!("Renderer #{} 首次渲染完成 (RGBA)", id);
                     }
                     Err(e) => {
                         warn!("Renderer #{} 首次渲染失败: {:?}", id, e);
@@ -395,11 +429,11 @@ fn run_renderer_process(
                         if let Ok(doc) = load_document(&current_url) {
                             let title = doc.title.clone();
                             renderer.set_document(doc);
-                            if let Ok(png) = renderer.render_to_png() {
-                                let result = RenderResultMessage {
-                                    png_data: png,
-                                    width: new_width,
-                                    height: new_height,
+                            if let Ok((w, h, rgba)) = renderer.render_to_rgba() {
+                                let result = RenderResultRgba {
+                                    rgba_data: rgba,
+                                    width: w,
+                                    height: h,
                                     title,
                                 };
                                 let _ = result_proxy.send_message(result.to_message());
@@ -501,11 +535,11 @@ fn run_renderer_process(
                                 if let Ok(doc) = load_document(&current_url) {
                                     let title = doc.title.clone();
                                     renderer.set_document(doc);
-                                    if let Ok(png) = renderer.render_to_png() {
-                                        let result = RenderResultMessage {
-                                            png_data: png,
-                                            width: new_width,
-                                            height: new_height,
+                                    if let Ok((w, h, rgba)) = renderer.render_to_rgba() {
+                                        let result = RenderResultRgba {
+                                            rgba_data: rgba,
+                                            width: w,
+                                            height: h,
                                             title,
                                         };
                                         let _ = result_proxy.send_message(result.to_message());

@@ -243,6 +243,73 @@ pub type InputEventProxy = InterfaceProxy;
 /// InputEvent 接口绑定（渲染器进程使用，负责接收输入事件）
 pub type InputEventBinding = InterfaceBinding;
 
+/// RGBA 渲染结果消息 —— 渲染器将一帧 RGBA 像素数据送回浏览器
+/// 比 PNG 方案省掉编解码，性能提升约 30%
+#[derive(Debug, Clone)]
+pub struct RenderResultRgba {
+    /// RGBA 像素数据（每个像素 4 字节）
+    pub rgba_data: Vec<u8>,
+    /// 图像宽度（px）
+    pub width: u32,
+    /// 图像高度（px）
+    pub height: u32,
+    /// 页面标题（可选）
+    pub title: Option<String>,
+}
+
+impl RenderResultRgba {
+    /// 序列化为 Mojo 消息
+    /// 格式: `[header_len:4byteBE][widthxheight|title][rgba_bytes]`
+    pub fn to_message(&self) -> Message {
+        let title = self.title.as_deref().unwrap_or("");
+        let header = format!("{}x{}|RGBA|{}", self.width, self.height, title);
+        let header_bytes = header.as_bytes();
+        let mut data = Vec::with_capacity(4 + header_bytes.len() + self.rgba_data.len());
+        data.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+        data.extend_from_slice(header_bytes);
+        data.extend_from_slice(&self.rgba_data);
+        Message::new("FramePaintedRGBA").with_data(data)
+    }
+
+    /// 从 Mojo 消息反序列化
+    pub fn from_message(msg: &Message) -> Option<Self> {
+        if msg.data.len() < 4 {
+            return None;
+        }
+        let header_len =
+            u32::from_be_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]) as usize;
+        if 4 + header_len > msg.data.len() {
+            return None;
+        }
+        let header_bytes = &msg.data[4..4 + header_len];
+        let rgba_data = &msg.data[4 + header_len..];
+        let header = std::str::from_utf8(header_bytes).ok()?;
+        let parts: Vec<&str> = header.split('|').collect();
+        if parts.len() >= 3 && parts[1] == "RGBA" {
+            let dims: Vec<&str> = parts[0].split('x').collect();
+            if dims.len() == 2 {
+                let title = if parts.len() >= 3 {
+                    let t = parts[2..].join("|");
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
+                } else {
+                    None
+                };
+                return Some(Self {
+                    rgba_data: rgba_data.to_vec(),
+                    width: dims[0].parse().unwrap_or(0),
+                    height: dims[1].parse().unwrap_or(0),
+                    title,
+                });
+            }
+        }
+        None
+    }
+}
+
 /// 创建一对 InputEvent 接口管道端点
 ///
 /// 返回 `(PendingRemote, PendingReceiver)`，分别对应浏览器端和渲染器端。

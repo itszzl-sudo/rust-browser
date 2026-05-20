@@ -160,36 +160,28 @@ impl BrowserApp {
     /// 通过 IPC 从渲染器进程获取最新帧
     fn refresh_from_renderer(&mut self) {
         if let Some(ref mut host) = self.browser_host {
-            // 从 Mojo IPC 管道接收渲染结果
-            if let Some(result) = host.try_receive_result() {
+            // 优先接收 RGBA 渲染结果（省掉 PNG 编解码）
+            if let Some(result) = host.try_receive_rgba_result() {
                 add_log_message(format!(
-                    "收到渲染帧: {}x{} ({} bytes)",
+                    "收到渲染帧: {}x{} (RGBA, {} bytes)",
                     result.width,
                     result.height,
-                    result.png_data.len()
+                    result.rgba_data.len()
                 ));
 
-                match image::load_from_memory(&result.png_data) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = rgba.dimensions();
-                        add_log_message(format!("图片解码成功: {}x{}", w, h));
-                        let pixels: Vec<u8> = rgba.into_raw();
-                        self.image_data = Some(egui::ColorImage::from_rgba_unmultiplied(
-                            [w as usize, h as usize],
-                            &pixels,
-                        ));
-                        self.error_message = None;
-                        self.is_loading = false;
-                        if let Some(ref title) = result.title {
-                            add_log_message(format!("页面标题: {}", title));
-                        }
-                    }
-                    Err(e) => {
-                        let err = format!("图像解析失败: {}", e);
-                        self.error_message = Some(err.clone());
-                        add_log_message(err);
-                    }
+                let w = result.width;
+                let h = result.height;
+                let pixels = result.rgba_data;
+
+                // 直接使用 RGBA 像素，跳过 PNG 解码
+                self.image_data = Some(egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    &pixels,
+                ));
+                self.error_message = None;
+                self.is_loading = false;
+                if let Some(ref title) = result.title {
+                    add_log_message(format!("页面标题: {}", title));
                 }
             }
         }

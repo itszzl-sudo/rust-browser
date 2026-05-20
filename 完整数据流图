@@ -1,0 +1,40 @@
+用户点击书签/输入URL
+    │
+    ▼
+BrowserApp::navigate(url)
+    │  IPC (Navigation管道)
+    ▼
+run_renderer_process (渲染器线程)
+    │
+    ├─ render_loading_page() → PNG → IPC → GUI显示"加载中..."
+    │
+    ├─ load_document(url)
+    │   ├─ NetworkClient::fetch_html_blocking() ← reqwest HTTP请求
+    │   ├─ kuchiki::parse_html() → DOM树
+    │   ├─ DomWrapper::build_node_index() → 64位ID索引
+    │   └─ renderer.set_document(doc)
+    │
+    ├─ extract_style_tags() → CSS文本
+    ├─ parse_css_rules() + rules_to_style_map() → StyleMap
+    │
+    ├─ TaffyLayoutEngine::compute(dom)
+    │   ├─ 递归遍历DOM → 创建taffy节点
+    │   ├─ determine_style() → 解析CSS属性
+    │   └─ taffy::compute_layout() → 绝对坐标
+    │
+    ├─ render_document()
+    │   ├─ 设置画布背景色(body background-color)
+    │   ├─ render_tree_with_taffy() 深度遍历
+    │   │   ├─ 渲染背景/边框/box-shadow
+    │   │   ├─ 渲染图片(缓存/网络/base64)
+    │   │   ├─ 渲染文本(cosmic-text)
+    │   │   └─ overflow hidden裁剪
+    │   └─ painter.to_png() → PNG字节
+    │
+    └─ IPC (RenderResult管道) → PNG数据
+    │
+    ▼
+BrowserApp::refresh_from_renderer()
+    ├─ image::load_from_memory() → RGBA像素
+    ├─ egui::ColorImage → GPU纹理
+    └─ egui::CentralPanel::show() → 屏幕显示

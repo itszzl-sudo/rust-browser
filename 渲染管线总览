@@ -1,0 +1,25 @@
+HTML字符串
+  │ kuchiki (HTML解析器)
+  ▼
+DOM树 (NodeRef)
+  │ extract_style_tags() + parse_css_rules()
+  ▼
+CSS规则列表
+  │ rules_to_style_map() [selectors crate 匹配]
+  ▼
+StyleMap (标签名→声明列表)
+  │ TaffyLayoutEngine::compute()
+  ▼
+布局节点列表 (x, y, width, height, background, color, ...)
+  │ render_tree_with_taffy() [深度优先]
+  ▼
+tiny-skia Pixmap (像素矩阵)
+  │ encode_png()
+  ▼
+PNG字节
+  │ IPC / image::load_from_memory
+  ▼
+egui ColorImage
+  │ GPU纹理上传
+  ▼
+屏幕像素
