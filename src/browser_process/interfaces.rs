@@ -117,36 +117,59 @@ pub struct RenderResultMessage {
 impl RenderResultMessage {
     /// 序列化为 Mojo 消息
     ///
-    /// 格式: `widthxheight|title\n<png_bytes>`
+    /// 格式: `[header_len:4byteBE][widthxheight|title][png_bytes]`
+    /// 使用长度前缀避免 PNG 二进制数据中的字节干扰分隔符
     pub fn to_message(&self) -> Message {
         let title = self.title.as_deref().unwrap_or("");
-        let header = format!("{}x{}|{}\n", self.width, self.height, title);
-        let mut data = header.into_bytes();
+        let header = format!("{}x{}|{}", self.width, self.height, title);
+        let header_bytes = header.as_bytes();
+
+        // 4 字节大端头部长度 + 头部文本 + PNG 数据
+        let mut data = Vec::with_capacity(4 + header_bytes.len() + self.png_data.len());
+        data.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+        data.extend_from_slice(header_bytes);
         data.extend_from_slice(&self.png_data);
         Message::new("FramePainted").with_data(data)
     }
 
     /// 从 Mojo 消息反序列化
     pub fn from_message(msg: &Message) -> Option<Self> {
-        let s = String::from_utf8_lossy(&msg.data);
-        if let Some(newline_pos) = s.find('\n') {
-            let header = &s[..newline_pos];
-            let body = &msg.data[newline_pos + 1..];
-            let parts: Vec<&str> = header.split('|').collect();
-            if parts.len() >= 2 {
-                let dims: Vec<&str> = parts[0].split('x').collect();
-                if dims.len() == 2 {
-                    return Some(Self {
-                        png_data: body.to_vec(),
-                        width: dims[0].parse().unwrap_or(0),
-                        height: dims[1].parse().unwrap_or(0),
-                        title: if parts.len() >= 3 && !parts[2].is_empty() {
-                            Some(parts[2].to_string())
-                        } else {
-                            None
-                        },
-                    });
-                }
+        if msg.data.len() < 4 {
+            return None;
+        }
+
+        // 读取前 4 字节作为头部长度（大端）
+        let header_len =
+            u32::from_be_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]) as usize;
+
+        if 4 + header_len > msg.data.len() {
+            return None;
+        }
+
+        let header_bytes = &msg.data[4..4 + header_len];
+        let png_data = &msg.data[4 + header_len..];
+
+        let header = std::str::from_utf8(header_bytes).ok()?;
+        let parts: Vec<&str> = header.split('|').collect();
+        if parts.len() >= 2 {
+            let dims: Vec<&str> = parts[0].split('x').collect();
+            if dims.len() == 2 {
+                let title = if parts.len() >= 2 {
+                    let t = parts[1..].join("|");
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
+                } else {
+                    None
+                };
+                return Some(Self {
+                    png_data: png_data.to_vec(),
+                    width: dims[0].parse().unwrap_or(0),
+                    height: dims[1].parse().unwrap_or(0),
+                    title,
+                });
             }
         }
         None
@@ -262,6 +285,45 @@ mod tests {
         assert_eq!(decoded.width, 800);
         assert_eq!(decoded.height, 600);
         assert_eq!(decoded.title, Some("Test Page".to_string()));
+        assert_eq!(decoded.png_data, vec![0x89, 0x50, 0x4e, 0x47]);
+    }
+
+    #[test]
+    fn test_render_result_message_png_with_newline_bytes() {
+        // PNG 二进制数据中包含 0x0A (\n) 字节，旧的分隔符方案会出错
+        let png_with_newlines = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG 签名含 \n
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR 块
+            0x0a, 0x0a, 0x0a, 0x0a, // 更多 \n 字节
+        ];
+        let msg = RenderResultMessage {
+            png_data: png_with_newlines.clone(),
+            width: 100,
+            height: 200,
+            title: None,
+        };
+        let m = msg.to_message();
+        let decoded = RenderResultMessage::from_message(&m).unwrap();
+        assert_eq!(decoded.width, 100);
+        assert_eq!(decoded.height, 200);
+        assert_eq!(decoded.title, None);
+        assert_eq!(decoded.png_data, png_with_newlines);
+    }
+
+    #[test]
+    fn test_render_result_message_chinese_title() {
+        // 中文标题中的字符可能包含 0x0A 字节的 UTF-8 编码片段
+        let msg = RenderResultMessage {
+            png_data: vec![0x89, 0x50, 0x4e, 0x47],
+            width: 1920,
+            height: 1080,
+            title: Some("百度一下，你就知道".to_string()),
+        };
+        let m = msg.to_message();
+        let decoded = RenderResultMessage::from_message(&m).unwrap();
+        assert_eq!(decoded.width, 1920);
+        assert_eq!(decoded.height, 1080);
+        assert_eq!(decoded.title, Some("百度一下，你就知道".to_string()));
         assert_eq!(decoded.png_data, vec![0x89, 0x50, 0x4e, 0x47]);
     }
 

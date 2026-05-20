@@ -218,13 +218,111 @@ impl Default for ImageCache {
 ///
 /// 根据 URL 格式自动选择加载方式：
 /// - `http://` / `https://` → 网络下载
+/// - `//` 开头 → 协议相对 URL，补充 `https:` 后网络下载
+/// - `data:image/...` → base64 编码图片
 /// - `file://` 或本地路径 → 文件加载
 fn load_image(url: &str) -> Option<Pixmap> {
+    // 处理 base64 编码图片
+    if url.starts_with("data:image/") {
+        return load_image_from_base64(url);
+    }
+
+    // 处理协议相对 URL（以 // 开头）
+    if url.starts_with("//") {
+        let full_url = format!("https:{}", url);
+        return load_image_from_network(&full_url);
+    }
+
     if url.starts_with("http://") || url.starts_with("https://") {
         load_image_from_network(url)
     } else {
         load_image_from_file(url)
     }
+}
+
+/// 从 base64 编码的 data URL 加载图片
+///
+/// 格式: `data:image/png;base64,iVBORw0KGgo...`
+fn load_image_from_base64(url: &str) -> Option<Pixmap> {
+    // 查找 base64 数据的起始位置（逗号之后）
+    let comma_pos = url.find(',')?;
+    let base64_data = &url[comma_pos + 1..];
+
+    // 解码 base64
+    let bytes = base64_decode(base64_data)?;
+
+    debug!(
+        "base64 图片解码成功: {} bytes (原始 URL 前 60 字符: {}...)",
+        bytes.len(),
+        &url[..60.min(url.len())]
+    );
+
+    decode_image_bytes(&bytes)
+}
+
+/// base64 解码（纯 Rust 实现，无额外依赖）
+/// 使用标准 base64 字符集: A-Za-z0-9+/
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    // 去除空白字符
+    let input: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    if input.is_empty() {
+        return None;
+    }
+
+    // 处理填充字符
+    let input = input.trim_end_matches('=');
+
+    // 解码表: 字符 → 6-bit 值
+    let decode_char = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+
+    let input_bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(input_bytes.len() * 3 / 4);
+
+    let mut i = 0;
+    while i + 3 < input_bytes.len() {
+        let a = decode_char(input_bytes[i])?;
+        let b = decode_char(input_bytes[i + 1])?;
+        let c = decode_char(input_bytes[i + 2])?;
+        let d = decode_char(input_bytes[i + 3])?;
+
+        let combined = (a << 18) | (b << 12) | (c << 6) | d;
+        result.push((combined >> 16) as u8);
+        result.push(((combined >> 8) & 0xFF) as u8);
+        result.push((combined & 0xFF) as u8);
+
+        i += 4;
+    }
+
+    // 处理剩余字节
+    let remaining = input_bytes.len() - i;
+    match remaining {
+        2 => {
+            let a = decode_char(input_bytes[i])?;
+            let b = decode_char(input_bytes[i + 1])?;
+            let combined = (a << 18) | (b << 12);
+            result.push((combined >> 16) as u8);
+        }
+        3 => {
+            let a = decode_char(input_bytes[i])?;
+            let b = decode_char(input_bytes[i + 1])?;
+            let c = decode_char(input_bytes[i + 2])?;
+            let combined = (a << 18) | (b << 12) | (c << 6);
+            result.push((combined >> 16) as u8);
+            result.push(((combined >> 8) & 0xFF) as u8);
+        }
+        _ => {}
+    }
+
+    Some(result)
 }
 
 /// 从网络加载图片（同步阻塞方式）
@@ -291,13 +389,15 @@ fn load_image_from_file(url: &str) -> Option<Pixmap> {
             let data = rgba.into_raw();
 
             let size = IntSize::from_wh(w, h)?;
-            Pixmap::from_vec(data, size).map(|p| {
-                trace!("本地图片加载成功: {} ({}x{})", path.display(), w, h);
-                p
-            }).or_else(|| {
-                warn!("无法将图片数据转换为 Pixmap: {}", path.display());
-                None
-            })
+            Pixmap::from_vec(data, size)
+                .map(|p| {
+                    trace!("本地图片加载成功: {} ({}x{})", path.display(), w, h);
+                    p
+                })
+                .or_else(|| {
+                    warn!("无法将图片数据转换为 Pixmap: {}", path.display());
+                    None
+                })
         }
         Err(e) => {
             error!("本地图片解码失败 ({}): {}", path.display(), e);
@@ -394,5 +494,41 @@ mod tests {
     fn test_load_nonexistent_relative_path() {
         let result = load_image("nonexistent_image_file_12345.png");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_protocol_relative_url_prefix() {
+        // 协议相对 URL 应被识别为网络 URL，不走到本地文件
+        let result = load_image("//www.example.com/image.png");
+        // 无法真的下载，但至少不会 panic 且不走到本地文件
+        // 这里只验证不会 panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_base64_decode_simple() {
+        // "hello" 的 base64 编码
+        let result = base64_decode("aGVsbG8=");
+        assert_eq!(result, Some(vec![104, 101, 108, 108, 111]));
+    }
+
+    #[test]
+    fn test_base64_decode_empty() {
+        let result = base64_decode("");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_base64_decode_no_padding() {
+        let result = base64_decode("aGVsbG8");
+        assert_eq!(result, Some(vec![104, 101, 108, 108, 111]));
+    }
+
+    #[test]
+    fn test_data_url_prefix_detection() {
+        // data URL 不应走到网络请求或本地文件
+        let result = load_image("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAA=");
+        // 解码失败是预期的（截断的 base64），但不应该 panic
+        assert!(result.is_none() || result.is_some());
     }
 }

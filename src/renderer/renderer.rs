@@ -224,7 +224,6 @@ impl Renderer {
             document.title.as_deref().unwrap_or("无标题")
         );
 
-        let (width, height) = self.context.viewport();
         let dom = document.get_dom();
 
         // 1. 从 DOM 提取 <style> CSS
@@ -243,7 +242,8 @@ impl Renderer {
         };
 
         // 3. 创建 TaffyLayoutEngine 并设置 StyleMap
-        let mut taffy = TaffyLayoutEngine::new(width as f32, height as f32);
+        let (vp_w, vp_h) = self.context.viewport();
+        let mut taffy = TaffyLayoutEngine::new(vp_w as f32, vp_h as f32);
         taffy.set_style_map(style_map);
 
         // 4. 计算布局
@@ -251,49 +251,58 @@ impl Renderer {
         if let Err(e) = &layout_result {
             warn!("Taffy 布局计算失败: {}, 使用手动布局回退", e);
         }
-        
+
         // 调试日志：检查布局结果
-        debug!("布局结果: nodes={}, is_empty={}", taffy.len(), taffy.is_empty());
-        
+        debug!(
+            "布局结果: nodes={}, is_empty={}",
+            taffy.len(),
+            taffy.is_empty()
+        );
+
         // 如果布局为空但文档不是空的，尝试使用 fallback
         if taffy.is_empty() {
             // 检查 DOM 中有多少个元素
             let elements = dom.traverse_elements();
             debug!("DOM 元素数量: {}", elements.len());
-            
+
             // 仍然尝试渲染，至少显示 loading 页面内容
             // 使用 render_simple 作为 fallback
         }
 
-        // 4.1 计算页面总高度（超长截图）
-        let page_height = if !taffy.is_empty() {
-            let max_bottom = taffy
-                .get_all_layout_nodes()
-                .iter()
-                .map(|n| n.y + n.height)
-                .fold(0.0_f32, f32::max)
-                .max(height as f32);
-            (max_bottom + 50.0) as u32 // 加底部边距
-        } else {
-            height
-        };
-
-        // 4.2 如果页面高度超过视口高度，创建完整页面大小的 pixmap
-        let orig_pixmap = self.painter.pixmap_mut().clone();
-        let is_tall = page_height > height;
-        if is_tall {
-            if let Some(page_pixmap) = Pixmap::new(width, page_height) {
-                *self.painter.pixmap_mut() = page_pixmap;
-                debug!("创建超长截图画布: {}x{}", width, page_height);
-            }
+        // 4.5 从 body/html 获取背景色，设置画布背景
+        let body_nodes = taffy.find_by_tag("body");
+        eprintln!(
+            "[背景调试] body 节点数: {} (is_empty={})",
+            body_nodes.len(),
+            taffy.is_empty()
+        );
+        for (i, n) in body_nodes.iter().enumerate() {
+            eprintln!(
+                "[背景调试]   body[{}] background={:?}, tag={}, pos=({},{}) size=({}x{})",
+                i, n.background, n.tag_name, n.x, n.y, n.width, n.height
+            );
         }
+        let html_nodes = taffy.find_by_tag("html");
+        for (i, n) in html_nodes.iter().enumerate() {
+            eprintln!(
+                "[背景调试]   html[{}] background={:?}, tag={}",
+                i, n.background, n.tag_name
+            );
+        }
+        let page_bg = body_nodes
+            .iter()
+            .find_map(|n| n.background.clone())
+            .or_else(|| html_nodes.iter().find_map(|n| n.background.clone()))
+            .unwrap_or(Color::WHITE);
+        eprintln!(
+            "[背景调试] 最终背景色: {:?} (r={},g={},b={},a={})",
+            page_bg, page_bg.r, page_bg.g, page_bg.b, page_bg.a
+        );
+        self.painter.set_background(page_bg);
+        self.painter.paint();
 
-        // 5. 使用 Taffy 布局结果渲染
+        // 5. 使用 Taffy 布局结果渲染（只渲染视口大小，不创建超长截图）
         {
-            // 先平铺白色背景（因为 pixmap 已重置）
-            self.painter.set_background(Color::WHITE);
-            self.painter.paint();
-
             let mut renderer = TaffyRenderer {
                 painter: &mut self.painter,
                 taffy: &taffy,
@@ -301,14 +310,6 @@ impl Renderer {
                 node_index_cache: std::collections::HashMap::new(),
             };
             renderer.render_dom();
-        }
-
-        // 5.1 生成完整页面 PNG 并缓存
-        if is_tall {
-            let full_png = self.painter.to_png();
-            self.page_png = Some(full_png);
-            // 恢复原始视口大小的 pixmap
-            *self.painter.pixmap_mut() = orig_pixmap;
         }
 
         // 6. 保存布局结果，用于后续点击测试
@@ -326,32 +327,19 @@ impl Renderer {
     ) -> Result<Vec<u8>, RenderError> {
         self.is_loading = true;
 
-        // 计算页面总高度（长页面截图）
-        let (width, height) = self.context.viewport();
-        let page_height = if !taffy.is_empty() {
-            let max_bottom = taffy
-                .get_all_layout_nodes()
-                .iter()
-                .map(|n| n.y + n.height)
-                .fold(0.0_f32, f32::max)
-                .max(height as f32);
-            (max_bottom + 50.0) as u32
-        } else {
-            height
-        };
-
-        let is_tall = page_height > height;
-        let orig_pixmap = self.painter.pixmap_mut().clone();
-
-        // 如果页面超过视口，创建完整页面大小的画布
-        if is_tall {
-            if let Some(page_pixmap) = Pixmap::new(width, page_height) {
-                *self.painter.pixmap_mut() = page_pixmap;
-                debug!("超长截图: {}x{}", width, page_height);
-            }
-        }
-
-        self.painter.set_background(Color::WHITE);
+        // 从 body/html 获取背景色
+        let page_bg = taffy
+            .find_by_tag("body")
+            .iter()
+            .find_map(|n| n.background.clone())
+            .or_else(|| {
+                taffy
+                    .find_by_tag("html")
+                    .iter()
+                    .find_map(|n| n.background.clone())
+            })
+            .unwrap_or(Color::WHITE);
+        self.painter.set_background(page_bg);
         self.painter.paint();
 
         if !taffy.is_empty() {
@@ -364,18 +352,8 @@ impl Renderer {
             renderer.render_dom();
         }
 
-        // 长页面：保留完整 PNG，恢复原始画布
-        let result = if is_tall {
-            let full_png = self.painter.to_png();
-            self.page_png = Some(full_png.clone());
-            *self.painter.pixmap_mut() = orig_pixmap;
-            full_png
-        } else {
-            self.painter.to_png()
-        };
-
         self.is_loading = false;
-        Ok(result)
+        Ok(self.painter.to_png())
     }
 
     fn render_blank_page(&mut self) -> Result<(), RenderError> {
@@ -387,7 +365,7 @@ impl Renderer {
 
         // 获取视口尺寸
         let (width, height) = self.context.viewport();
-        
+
         // 计算居中提示框的位置
         let box_w = 320.0_f32.min(width as f32 * 0.8);
         let box_h = 160.0_f32.min(height as f32 * 0.5);
@@ -395,19 +373,40 @@ impl Renderer {
         let box_y = (height as f32 - box_h) / 2.0;
 
         // 白色背景的提示框
-        self.painter.draw_rounded_rect(box_x, box_y, box_w, box_h, 8.0, &Color::WHITE);
-        self.painter.draw_rounded_border(box_x, box_y, box_w, box_h, 8.0, 1.0, &Color::from_hex("#CCCCCC"));
-        
+        self.painter
+            .draw_rounded_rect(box_x, box_y, box_w, box_h, 8.0, &Color::WHITE);
+        self.painter.draw_rounded_border(
+            box_x,
+            box_y,
+            box_w,
+            box_h,
+            8.0,
+            1.0,
+            &Color::from_hex("#CCCCCC"),
+        );
+
         // 橙色警告图标（感叹号形状）
         let icon_center_x = box_x + box_w / 2.0;
         let icon_y = box_y + 25.0;
-        self.painter.draw_rect(icon_center_x - 2.0, icon_y, 4.0, 18.0, &Color::from_hex("#FF9800"));
-        self.painter.draw_rect(icon_center_x - 3.0, icon_y + 22.0, 6.0, 6.0, &Color::from_hex("#FF9800"));
+        self.painter.draw_rect(
+            icon_center_x - 2.0,
+            icon_y,
+            4.0,
+            18.0,
+            &Color::from_hex("#FF9800"),
+        );
+        self.painter.draw_rect(
+            icon_center_x - 3.0,
+            icon_y + 22.0,
+            6.0,
+            6.0,
+            &Color::from_hex("#FF9800"),
+        );
 
         // 创建临时的 TaffyRenderer 用于绘制文字
         let mut dummy_taffy = TaffyLayoutEngine::new(width as f32, height as f32);
         let dummy_dom = DomWrapper::from_html("<html><body></body></html>", None);
-        
+
         let mut text_renderer = TaffyRenderer {
             painter: &mut self.painter,
             taffy: &mut dummy_taffy,
@@ -723,10 +722,61 @@ struct TaffyRenderer<'a> {
     painter: &'a mut Painter,
     taffy: &'a TaffyLayoutEngine,
     dom: &'a DomWrapper,
-    node_index_cache: std::collections::HashMap<usize, usize>, // Rc ptr → dom index
+    /// 64 位稳定 ID → dom index 的映射
+    node_index_cache: std::collections::HashMap<u64, usize>,
 }
 
 impl<'a> TaffyRenderer<'a> {
+    /// 解析图片 URL 为绝对 URL（静态方法，不依赖 self）
+    ///
+    /// 处理以下情形：
+    /// - `//host.com/path` → `https://host.com/path`（协议相对）
+    /// - `/path/img.png` → `https://domain/path/img.png`（根相对）
+    /// - `img.png` → `https://domain/base/img.png`（相对路径）
+    /// - `http://...` / `https://...` → 不变
+    /// - `data:image/...` → 不变
+    fn resolve_image_url_internal(src: &str, dom: &DomWrapper) -> String {
+        // base64 和已有绝对协议的不处理
+        if src.starts_with("data:image/")
+            || src.starts_with("http://")
+            || src.starts_with("https://")
+        {
+            return src.to_string();
+        }
+
+        // 协议相对 URL
+        if src.starts_with("//") {
+            return format!("https:{}", src);
+        }
+
+        // 其他情况需要根据当前页面 URL 解析
+        let page_url = dom.url().map(|u| u.to_string()).unwrap_or_default();
+
+        if page_url.is_empty() {
+            return src.to_string();
+        }
+
+        // 根相对路径：/path/to/image.png
+        if src.starts_with('/') {
+            if let Ok(parsed) = url::Url::parse(&page_url) {
+                if let Some(host) = parsed.host_str() {
+                    let scheme = parsed.scheme();
+                    return format!("{}://{}{}", scheme, host, src);
+                }
+            }
+        }
+
+        // 相对路径：基于当前 URL 的目录解析
+        if let Ok(base) = url::Url::parse(&page_url) {
+            if let Ok(resolved) = base.join(src) {
+                return resolved.to_string();
+            }
+        }
+
+        // fallback：原样返回
+        src.to_string()
+    }
+
     fn render_dom(&mut self) {
         // 如果 taffy 为空（没有布局节点），走简单的 fallback 渲染
         if self.taffy.is_empty() {
@@ -736,20 +786,29 @@ impl<'a> TaffyRenderer<'a> {
         }
 
         // Build node_index_cache: iterate all descendants once
+        debug!("构建节点索引缓存...");
         self.node_index_cache.clear();
         for node in self.dom.inner_document().descendants() {
             if let Some(idx) = self.dom.index_of_node(&node) {
-                let rc_ptr = std::rc::Rc::as_ptr(&node.0) as usize;
-                self.node_index_cache.insert(rc_ptr, idx);
+                if let Some(id) = self.dom.node_id_of_node(&node) {
+                    self.node_index_cache.insert(id, idx);
+                }
             }
         }
+        debug!(
+            "节点索引缓存构建完成，共 {} 项",
+            self.node_index_cache.len()
+        );
 
         // 使用 Taffy 布局结果遍历渲染
         let doc = self.dom.inner_document();
         // 从 document 的子节点开始遍历（跳过 Document 节点本身）
+        let mut count = 0;
         for child in doc.children() {
             self.render_tree_with_taffy(&child);
+            count += 1;
         }
+        debug!("渲染树遍历完成，共遍历 {} 个直接子节点", count);
     }
 
     /// 简单 fallback 渲染（没有 Taffy 布局时使用）
@@ -837,7 +896,9 @@ impl<'a> TaffyRenderer<'a> {
                             .get("src")
                             .map(|s| s.to_string());
                         if let Some(url) = src {
-                            let pixmap = self.load_image(&url);
+                            let absolute_url =
+                                TaffyRenderer::resolve_image_url_internal(&url, self.dom);
+                            let pixmap = self.load_image(&absolute_url);
                             if let Some(p) = pixmap {
                                 self.painter.draw_rect(
                                     20.0,
@@ -854,7 +915,13 @@ impl<'a> TaffyRenderer<'a> {
                                     tiny_skia::Transform::identity(),
                                     None,
                                 );
+                            } else {
+                                // 图片加载失败，显示占位符
+                                self.render_img_placeholder(20.0, *current_y, 120.0, 120.0);
                             }
+                        } else {
+                            // 没有 src 属性，显示占位符
+                            self.render_img_placeholder(20.0, *current_y, 120.0, 120.0);
                         }
                         *current_y += 160.0;
                     }
@@ -897,34 +964,34 @@ impl<'a> TaffyRenderer<'a> {
                     let w = layout.width;
                     let h = layout.height;
 
-                    // 检查当前节点是否为 hover 节点，如果是则应用 hover 样式覆盖
+                    // 跳过不可见节点（宽或高为 0）
+                    if w <= 0.0 || h <= 0.0 {
+                        for child in node_ref.children() {
+                            self.render_tree_with_taffy(&child);
+                        }
+                        return;
+                    }
+
                     let is_hovered = Some(dom_idx) == self.taffy.hovered_node;
 
-                    // 渲染元素背景（支持 border-radius，百分比按 min(w,h)/2 计算）
+                    // 渲染背景、边框、box-shadow、文本...
                     if let Some(bg) = &layout.background {
                         let br = layout.border_radius;
                         if br > 0.0 && w > 0.0 && h > 0.0 {
                             self.painter.draw_rounded_rect(x, y, w, h, br, bg);
                         } else if br < 0.0 && w > 0.0 && h > 0.0 {
-                            // 百分比圆角：半径为 min(w,h)/2
                             let r = w.min(h) / 2.0;
                             self.painter.draw_rounded_rect(x, y, w, h, r, bg);
                         } else {
                             self.painter.draw_rect(x, y, w, h, bg);
                         }
                     }
-
-                    // 渲染 box-shadow（优先使用 layout 中的值，fallback 到 StyleMap）
                     if let Some(shadow) = &layout.box_shadow {
                         self.render_box_shadow_from_str(shadow, x, y, w, h);
                     } else {
                         self.render_box_shadow_for_element(&tag_name, x, y, w, h);
                     }
-
-                    // 渲染背景图片
                     self.render_background_image(&tag_name, x, y, w, h);
-
-                    // 渲染元素边框（从 layout 获取 border_color）
                     if let Some(bc) = &layout.border_color {
                         let bw = self.get_border_width(&tag_name, &layout);
                         if bw > 0.0 {
@@ -936,11 +1003,7 @@ impl<'a> TaffyRenderer<'a> {
                             }
                         }
                     }
-
-                    // 渲染元素装饰（标签特定渲染）+ 传入 node_ref 用于 img src
                     self.render_element_box(&tag_name, x, y, w, h, Some(node_ref));
-
-                    // 如果是 hover 节点，绘制高亮边框
                     if is_hovered {
                         let highlight = layout
                             .border_color
@@ -949,21 +1012,13 @@ impl<'a> TaffyRenderer<'a> {
                             .clone();
                         self.painter.draw_rect_border(x, y, w, h, 2.0, &highlight);
                     }
-
-                    // 渲染图片元素
                     if tag_name == "img" {
                         self.render_img_element(x, y, w, h, node_ref);
                     }
-
-                    // 渲染元素的直接文本内容（跳过 style/script 等不可见标签）
                     if tag_name != "style" && tag_name != "script" && tag_name != "head" {
                         let text_content = collect_text(node_ref);
                         if !text_content.trim().is_empty() {
                             let font_size = layout.font_size.max(12.0);
-                            if font_size > h && h > 0.0 {
-                                // 如果字号超出元素高度，缩小字号适配
-                                let _ = font_size;
-                            }
                             let actual_font_size = if h > 0.0 {
                                 font_size.min(h * 0.7).max(8.0)
                             } else {
@@ -971,9 +1026,6 @@ impl<'a> TaffyRenderer<'a> {
                             };
                             let default_color = Color::from_hex("#333333");
                             let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
-                            // 水平 padding 保持 10px，垂直居中
-                            // text_y 是 cosmic-text 的基线位置（不是文本顶部）
-                            // 基线 = 顶部 + 字体大小
                             let padding_x = 10.0;
                             let text_y = if h > actual_font_size {
                                 y + (h - actual_font_size) / 2.0 + actual_font_size
@@ -989,8 +1041,6 @@ impl<'a> TaffyRenderer<'a> {
                                 font_color,
                                 layout.font_weight,
                             );
-
-                            // 渲染 text-decoration
                             self.render_text_decoration(
                                 &text_content,
                                 x,
@@ -1003,12 +1053,18 @@ impl<'a> TaffyRenderer<'a> {
                             );
                         }
                     }
-                }
-            }
 
-            // 递归渲染子节点
-            for child in node_ref.children() {
-                self.render_tree_with_taffy(&child);
+                    // 递归子节点前应用 overflow: hidden 裁剪
+                    if layout.overflow_x == "hidden" || layout.overflow_y == "hidden" {
+                        self.painter.set_clip(x, y, w, h);
+                    }
+                    for child in node_ref.children() {
+                        self.render_tree_with_taffy(&child);
+                    }
+                    if layout.overflow_x == "hidden" || layout.overflow_y == "hidden" {
+                        self.painter.clear_clip();
+                    }
+                }
             }
         } else {
             // 文本节点、文档节点等 - 直接递归子节点
@@ -1018,10 +1074,10 @@ impl<'a> TaffyRenderer<'a> {
         }
     }
 
-    /// 通过 NodeRef 的 Rc 指针查找 DOM 索引 (O(1) cache lookup)
+    /// 通过 NodeRef 查找 DOM 索引（O(1) cache lookup，使用 64 位稳定 ID）
     fn find_dom_index(&self, node_ref: &NodeRef) -> Option<usize> {
-        let rc_ptr = std::rc::Rc::as_ptr(&node_ref.0) as usize;
-        self.node_index_cache.get(&rc_ptr).copied()
+        let id = self.dom.node_id_of_node(node_ref)?;
+        self.node_index_cache.get(&id).copied()
     }
 
     /// 精美渲染元素装饰（背景、边框、装饰线等）
@@ -1104,12 +1160,15 @@ impl<'a> TaffyRenderer<'a> {
         }
     }
 
-    /// 实际渲染图片元素
+    /// 实际渲染图片元素（支持绝对 URL、协议相对 URL、相对路径、base64 图片）
+    /// 图片加载失败时显示占位符
     fn render_img_element(&mut self, x: f32, y: f32, w: f32, h: f32, element: &NodeRef) {
         if let Some(el) = element.as_element() {
             let src = el.attributes.borrow().get("src").map(|s| s.to_string());
             if let Some(url) = src {
-                let pixmap = self.load_image(&url);
+                // 解析相对路径、协议相对 URL 等
+                let absolute_url = TaffyRenderer::resolve_image_url_internal(&url, self.dom);
+                let pixmap = self.load_image(&absolute_url);
                 if let Some(p) = pixmap {
                     // 居中绘制图片（不缩放）
                     let draw_x = x + (w - p.width() as f32) / 2.0;
@@ -1122,8 +1181,17 @@ impl<'a> TaffyRenderer<'a> {
                         tiny_skia::Transform::identity(),
                         None,
                     );
+                } else {
+                    // 图片加载失败，显示占位符
+                    self.render_img_placeholder(x, y, w, h);
                 }
+            } else {
+                // 没有 src 属性，显示占位符
+                self.render_img_placeholder(x, y, w, h);
             }
+        } else {
+            // 不是元素节点，显示占位符
+            self.render_img_placeholder(x, y, w, h);
         }
     }
 
@@ -1254,19 +1322,16 @@ impl<'a> TaffyRenderer<'a> {
         let taffy_focused = self.taffy.focused_node;
         node_ref
             .and_then(|nr| {
-                let rc_ptr = std::rc::Rc::as_ptr(&nr.0) as usize;
-                self.node_index_cache
-                    .get(&rc_ptr)
-                    .copied()
-                    .and_then(|dom_idx| {
-                        if taffy_focused == Some(dom_idx) {
-                            Some(true)
-                        } else {
-                            None
-                        }
-                    })
+                let id = self.dom.node_id_of_node(nr)?;
+                self.node_index_cache.get(&id).copied().and_then(|dom_idx| {
+                    if taffy_focused == Some(dom_idx) {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                })
             })
-            .is_some()
+            .unwrap_or(false)
     }
 
     /// 精美渲染 <textarea> 元素（多行文本输入框）
@@ -1419,6 +1484,12 @@ impl<'a> TaffyRenderer<'a> {
     }
 
     /// 通过全局 ImageCache 加载图片
+    ///
+    /// 已支持：
+    /// - `http://` / `https://` 网络图片
+    /// - `//` 协议相对 URL（自动补充 `https:`）
+    /// - `data:image/...` base64 编码图片
+    /// - 本地文件路径
     fn load_image(&self, url: &str) -> Option<tiny_skia::Pixmap> {
         let cache = global_image_cache();
         cache.get(url)
@@ -1429,6 +1500,8 @@ impl<'a> TaffyRenderer<'a> {
         let nodes = self.taffy.find_by_tag(_tag);
         for layout in nodes {
             if let Some(bg_image) = &layout.background_image {
+                // 解析背景图片 URL（支持协议相对、相对路径等）
+                let resolved_bg = TaffyRenderer::resolve_image_url_internal(bg_image, self.dom);
                 let cache = global_image_cache();
                 let bg_x = layout.bg_position_x as i32;
                 let bg_y = layout.bg_position_y as i32;
@@ -1436,7 +1509,7 @@ impl<'a> TaffyRenderer<'a> {
                 // sprite 裁剪（background-position）
                 if bg_x != 0 || bg_y != 0 {
                     if let Some(cropped) =
-                        ImageCache::crop_sprite(bg_image, bg_x, bg_y, w as u32, h as u32)
+                        ImageCache::crop_sprite(&resolved_bg, bg_x, bg_y, w as u32, h as u32)
                     {
                         self.painter.pixmap_mut().draw_pixmap(
                             x as i32,
@@ -1450,7 +1523,7 @@ impl<'a> TaffyRenderer<'a> {
                     }
                 }
 
-                if let Some(pixmap) = cache.get(bg_image) {
+                if let Some(pixmap) = cache.get(&resolved_bg) {
                     let img_w = pixmap.width() as f32;
                     let img_h = pixmap.height() as f32;
 
@@ -1712,6 +1785,70 @@ impl Renderer {
     pub fn with_size(width: u32, height: u32) -> Self {
         Self::new(width, height)
     }
+
+    /// 解析图片 URL 为绝对 URL
+    ///
+    /// 处理以下情形：
+    /// - `//host.com/path` → `https://host.com/path`（协议相对）
+    /// - `/path/img.png` → `https://domain/path/img.png`（根相对）
+    /// - `img.png` → `https://domain/base/img.png`（相对路径）
+    /// - `http://...` / `https://...` → 不变
+    /// - `data:image/...` → 不变
+    pub fn resolve_image_url(&self, src: &str) -> String {
+        Self::resolve_image_url_static(src, self.document.as_ref())
+    }
+
+    /// 解析图片 URL 为绝对 URL（静态版，可无 self 调用）
+    pub fn resolve_image_url_static(src: &str, document: Option<&Document>) -> String {
+        // base64 和已有绝对协议的不处理
+        if src.starts_with("data:image/")
+            || src.starts_with("http://")
+            || src.starts_with("https://")
+        {
+            return src.to_string();
+        }
+
+        // 协议相对 URL
+        if src.starts_with("//") {
+            return format!("https:{}", src);
+        }
+
+        // 其他情况需要根据当前页面 URL 解析
+        let page_url = document
+            .and_then(|d| {
+                let u = &d.url;
+                if u.is_empty() || u == "about:blank" {
+                    None
+                } else {
+                    Some(u.clone())
+                }
+            })
+            .unwrap_or_default();
+
+        if page_url.is_empty() {
+            return src.to_string();
+        }
+
+        // 根相对路径：/path/to/image.png
+        if src.starts_with('/') {
+            if let Ok(parsed) = url::Url::parse(&page_url) {
+                if let Some(host) = parsed.host_str() {
+                    let scheme = parsed.scheme();
+                    return format!("{}://{}{}", scheme, host, src);
+                }
+            }
+        }
+
+        // 相对路径：基于当前 URL 的目录解析
+        if let Ok(base) = url::Url::parse(&page_url) {
+            if let Ok(resolved) = base.join(src) {
+                return resolved.to_string();
+            }
+        }
+
+        // fallback：原样返回
+        src.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -1736,5 +1873,114 @@ mod tests {
         let cache = global_image_cache();
         // 只是验证返回非空
         assert!(cache.len() == 0);
+    }
+
+    #[test]
+    fn test_render_document_applies_body_background_color() {
+        // 验证 body background-color: #ff0000 被正确应用为画布背景色
+        let html = r#"<html><head><style>body { background-color: #ff0000; }</style></head><body><p>red bg</p></body></html>"#;
+        // 先验证 CSS 提取
+        let dom = crate::DomWrapper::from_html(html, None);
+        let css_text = extract_style_tags(&dom);
+        eprintln!("[测试] 提取的 CSS: '{}'", css_text);
+        assert!(!css_text.is_empty(), "CSS should be extracted");
+        let rules = crate::css_engine::parse_css_rules(&css_text);
+        eprintln!("[测试] CSS 规则数: {}", rules.len());
+        for r in &rules {
+            eprintln!(
+                "[测试]   选择器: '{}', 声明数: {}",
+                r.selector,
+                r.declarations.len()
+            );
+            for d in &r.declarations {
+                eprintln!("[测试]     {}: {}", d.property, d.value);
+            }
+        }
+
+        let doc = crate::browser::Document::from_html(html, "test://");
+        let mut renderer = Renderer::new(100, 100);
+        let doc_opt = Some(doc);
+        let result = renderer.render(&doc_opt);
+        assert!(result.is_ok(), "render should succeed");
+
+        // 解码 PNG 并检查中心像素是否为红色
+        let png = result.unwrap();
+        let img = image::load_from_memory(&png).expect("valid png");
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        assert_eq!(w, 100);
+        assert_eq!(h, 100);
+
+        // 检查中心像素 (50, 50) 是否为红色 (255, 0, 0, 255)
+        let center = rgba.get_pixel(50, 50);
+        assert_eq!(center[0], 255, "red channel");
+        assert_eq!(center[1], 0, "green channel should be 0");
+        assert_eq!(center[2], 0, "blue channel should be 0");
+        assert_eq!(center[3], 255, "alpha channel");
+    }
+
+    #[test]
+    fn test_render_document_white_background_when_no_body_bg() {
+        // 没有设置背景色时应该是白色
+        let html = r#"<html><body><p>default white</p></body></html>"#;
+        let doc = crate::browser::Document::from_html(html, "test://");
+        let mut renderer = Renderer::new(100, 100);
+        let doc_opt = Some(doc);
+        let result = renderer.render(&doc_opt);
+        assert!(result.is_ok());
+
+        let png = result.unwrap();
+        let img = image::load_from_memory(&png).expect("valid png");
+        let rgba = img.to_rgba8();
+        let center = rgba.get_pixel(50, 50);
+        assert_eq!(center[0], 255, "should be white");
+        assert_eq!(center[1], 255, "should be white");
+        assert_eq!(center[2], 255, "should be white");
+    }
+
+    #[test]
+    fn test_hit_test_link_detects_anchor() {
+        // 验证 hit_test_link 能正确找到 <a> 标签的 href
+        let html =
+            r#"<html><body><a href="https://example.com"><span>link</span></a></body></html>"#;
+        let doc = crate::browser::Document::from_html(html, "test://");
+        let mut renderer = Renderer::new(800, 600);
+        renderer.set_document(doc);
+        // 使用 render_to_png，不会克隆 Document（DomWrapper::clone 会创建空树）
+        let _ = renderer.render_to_png();
+
+        let dom = renderer.document().as_ref().unwrap().get_dom();
+        let href = renderer.hit_test_link(50.0, 50.0, dom);
+        assert!(href.is_some(), "should find href on <a>");
+        assert_eq!(href.unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn test_hit_test_link_returns_none_on_non_link() {
+        let html = r#"<html><body><p>not a link</p></body></html>"#;
+        let doc = crate::browser::Document::from_html(html, "test://");
+        let mut renderer = Renderer::new(800, 600);
+        renderer.set_document(doc);
+        let _ = renderer.render_to_png();
+
+        let dom = renderer.document().as_ref().unwrap().get_dom();
+        let href = renderer.hit_test_link(50.0, 50.0, dom);
+        assert!(href.is_none(), "<p> should not have href");
+    }
+
+    #[test]
+    fn test_hit_test_link_click_on_span_inside_anchor() {
+        // 点击 <a> 内部的 <span> 也应该返回链接
+        let html =
+            r#"<html><body><a href="https://example.com"><span>click me</span></a></body></html>"#;
+        let doc = crate::browser::Document::from_html(html, "test://");
+        let mut renderer = Renderer::new(800, 600);
+        renderer.set_document(doc);
+        let _ = renderer.render_to_png();
+
+        let dom = renderer.document().as_ref().unwrap().get_dom();
+        let href = renderer.hit_test_link(50.0, 50.0, dom);
+        assert!(href.is_some(), "clicking span inside a should return href");
+        assert_eq!(href.unwrap(), "https://example.com");
     }
 }

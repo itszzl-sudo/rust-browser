@@ -206,6 +206,7 @@ impl BrowserProcessHost {
     pub fn try_receive_result(&mut self) -> Option<RenderResultMessage> {
         let id = self.active_tab_id?;
         let renderer = self.renderers.get(&id)?;
+
         if let Some(msg) = renderer.result_binding.try_receive() {
             let result = RenderResultMessage::from_message(&msg);
             // 更新标签页标题
@@ -322,9 +323,13 @@ fn run_renderer_process(
         // 第二步：加载文档 + 渲染（耗时操作）
         match load_document(&current_url) {
             Ok(doc) => {
+                // 保存文档到渲染器，后续点击/事件需要访问
                 let title = doc.title.clone();
-                let doc_opt = Some(doc);
-                match renderer.render(&doc_opt) {
+                // 先把 document 移入渲染器，再通过渲染器的 document() 方法获取不可变引用
+                renderer.set_document(doc);
+                // 注意：不能 clone document（DomWrapper 的 clone 会创建空树）
+                // render() 接受 &Option<Document>，所以传 self.document 的引用
+                match renderer.render_to_png() {
                     Ok(png) => {
                         let result = RenderResultMessage {
                             png_data: png,
@@ -389,8 +394,8 @@ fn run_renderer_process(
                         // 加载文档 + 渲染
                         if let Ok(doc) = load_document(&current_url) {
                             let title = doc.title.clone();
-                            let doc_opt = Some(doc);
-                            if let Ok(png) = renderer.render(&doc_opt) {
+                            renderer.set_document(doc);
+                            if let Ok(png) = renderer.render_to_png() {
                                 let result = RenderResultMessage {
                                     png_data: png,
                                     width: new_width,
@@ -495,8 +500,8 @@ fn run_renderer_process(
 
                                 if let Ok(doc) = load_document(&current_url) {
                                     let title = doc.title.clone();
-                                    let doc_opt = Some(doc);
-                                    if let Ok(png) = renderer.render(&doc_opt) {
+                                    renderer.set_document(doc);
+                                    if let Ok(png) = renderer.render_to_png() {
                                         let result = RenderResultMessage {
                                             png_data: png,
                                             width: new_width,
@@ -657,10 +662,10 @@ fn load_document(url: &str) -> Result<Document, String> {
     } else {
         // 网络请求（同步，使用 reqwest blocking client）
         info!("开始网络请求: {}", url);
-        
+
         let client = crate::network::NetworkClient::new();
         let result = client.fetch_html_blocking(url);
-        
+
         match result {
             Ok((html, final_url)) => {
                 info!("网络请求成功，HTML 长度: {} 字符", html.len());
@@ -686,7 +691,7 @@ fn load_document(url: &str) -> Result<Document, String> {
                     }
                     _ => format!("网络请求失败: {}", e),
                 };
-                
+
                 warn!("{}", error_detail);
                 Err(error_detail)
             }

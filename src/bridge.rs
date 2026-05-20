@@ -557,6 +557,16 @@ mod tests {
             Err("Mock: no network".to_string())
         }
 
+        fn on_window_open(&mut self, _handler: WindowOpenHandler) {
+            // Mock: no-op
+        }
+
+        fn handle_window_open(&mut self, url: &str) -> bool {
+            // Mock: 默认返回 false（让浏览器默认行为处理）
+            let _ = url;
+            false
+        }
+
         fn download_file(&mut self, _url: &str, _path: &str) -> Result<u64, String> {
             Err("Mock: no network".to_string())
         }

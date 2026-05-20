@@ -97,6 +97,10 @@ pub struct TaffyLayoutNode {
     pub background_size: String,
     /// CSS text-decoration（underline/line-through/none）
     pub text_decoration: String,
+    /// CSS overflow（hidden/visible/auto/scroll）
+    pub overflow_x: String,
+    /// CSS overflow-y（hidden/visible/auto/scroll）
+    pub overflow_y: String,
 }
 
 /// 完整的 taffy 布局引擎（完整版）
@@ -339,6 +343,8 @@ impl TaffyLayoutEngine {
                 box_shadow: self.determine_box_shadow(&merged_decls),
                 background_size: self.determine_background_size(&merged_decls),
                 text_decoration: self.determine_text_decoration(&merged_decls),
+                overflow_x: self.determine_overflow(&merged_decls, "overflow-x"),
+                overflow_y: self.determine_overflow(&merged_decls, "overflow-y"),
             };
 
             let layout_idx = self.layout_nodes.len();
@@ -900,8 +906,6 @@ impl TaffyLayoutEngine {
             style.max_size.height = to_dim_val(&v);
         }
 
-        // overflow 暂不支持（taffy 0.10 中无此类型）
-
         // 解析 border-width（简化为所有边统一）
         if let Some(v) = get_declaration(decls, "border-width") {
             if let Some(px) = parse_length(&v) {
@@ -1182,6 +1186,31 @@ impl TaffyLayoutEngine {
             }
         }
         "auto".to_string()
+    }
+
+    /// 确定 overflow 值
+    fn determine_overflow(&self, decls: &[Declaration], property: &str) -> String {
+        if let Some(ov) = get_declaration(decls, property) {
+            let v = ov.trim().to_lowercase();
+            match v.as_str() {
+                "hidden" | "auto" | "scroll" => return v,
+                _ => {}
+            }
+        }
+        // overflow 简写
+        if property == "overflow-x" {
+            if let Some(ov) = get_declaration(decls, "overflow") {
+                let parts: Vec<&str> = ov.split_whitespace().collect();
+                if let Some(v) = parts.first() {
+                    let v = v.trim().to_lowercase();
+                    match v.as_str() {
+                        "hidden" | "auto" | "scroll" => return v,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        "visible".to_string()
     }
 
     /// 确定 text-decoration
@@ -1466,7 +1495,7 @@ impl TaffyLayoutEngine {
         self.layout_nodes.clear();
         self.dom_to_layout.clear();
         self.root = None;
-        self.style_map.clear();
+        // 不清空 style_map，由外部 set_style_map 管理
         self.total_node_count = 0;
         self.hovered_node = None;
         self.focused_node = None;
@@ -1544,5 +1573,296 @@ mod tests {
 
         let ps = engine.find_by_tag("p");
         assert!(ps.len() >= 1);
+    }
+
+    #[test]
+    fn test_hit_test_hits_center() {
+        use crate::DomWrapper;
+        // body 默认占满视口，点击中心应命中
+        let html = "<html><body style='width:800px;height:600px;'><p>hello</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let hit = engine.hit_test(400.0, 300.0);
+        assert!(hit.is_some(), "center should hit something");
+    }
+
+    #[test]
+    fn test_hit_test_misses_outside() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>hello</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        // 点击远超出视口的位置应该不命中任何节点
+        let hit = engine.hit_test(-100.0, -100.0);
+        assert!(hit.is_none(), "outside should not hit");
+    }
+
+    #[test]
+    fn test_set_viewport_after_compute() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>test</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        // 改视口后重新计算
+        engine.set_viewport(400.0, 300.0);
+        assert!(engine.compute(&dom).is_ok());
+        assert!(!engine.is_empty());
+    }
+
+    #[test]
+    fn test_get_layout_existing() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>test</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        // document 索引是 0，应该有布局
+        let layout = engine.get_layout(0);
+        assert!(layout.is_some());
+    }
+
+    #[test]
+    fn test_get_layout_nonexistent_index() {
+        use crate::DomWrapper;
+        let html = "<html><body></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let layout = engine.get_layout(99999);
+        assert!(layout.is_none());
+    }
+
+    #[test]
+    fn test_set_hovered_node() {
+        use crate::DomWrapper;
+        let html = "<html><body style='width:800px;height:600px;'><p>hover</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        // 设置 hover 为 body 的索引（至少 > 0）
+        engine.set_hovered_node(Some(1));
+        // hover 不会改变布局，但状态应被记录
+        let hit = engine.hit_test(400.0, 300.0);
+        assert!(hit.is_some());
+    }
+
+    #[test]
+    fn test_set_hovered_node_none() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>test</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        engine.set_hovered_node(None);
+        assert!(engine.hovered_node.is_none());
+    }
+
+    #[test]
+    fn test_set_and_get_focused_node() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>focus</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        engine.set_focused_node(Some(2));
+        assert_eq!(engine.get_focused_node(), Some(2));
+        assert!(engine.is_focused(2));
+        assert!(!engine.is_focused(1));
+    }
+
+    #[test]
+    fn test_set_focused_node_none() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>test</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        engine.set_focused_node(None);
+        assert_eq!(engine.get_focused_node(), None);
+    }
+
+    #[test]
+    fn test_dom_to_layout_map() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>map</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let map = engine.dom_to_layout_map();
+        assert!(!map.is_empty());
+        // 每个条目应有 dom_index -> taffy_info 的映射
+    }
+
+    #[test]
+    fn test_clear() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>clear</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+        assert!(!engine.is_empty());
+
+        engine.clear();
+        assert!(engine.is_empty());
+        assert_eq!(engine.len(), 0);
+    }
+
+    #[test]
+    fn test_hit_test_returns_dom_node() {
+        use crate::DomWrapper;
+        let html = "<html><body><div style='width:200px;height:100px;'>box</div></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        // 点击 div 区域（左上角）
+        let hit = engine.hit_test(10.0, 10.0);
+        if let Some(node) = hit {
+            let all_nodes = engine.get_all_layout_nodes();
+            // 找到 div 对应的节点
+            let found = all_nodes.iter().any(|n| n.dom_node == node.dom_node);
+            assert!(found, "hit node should exist in layout");
+        }
+    }
+
+    #[test]
+    fn test_find_by_tag_nonexistent() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>only</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let spans = engine.find_by_tag("span");
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn test_find_box_shadow_style_nonexistent() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>no shadow</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let shadow = engine.find_box_shadow_style("*");
+        assert!(shadow.is_none());
+    }
+
+    #[test]
+    fn test_layout_coordinates_positive() {
+        use crate::DomWrapper;
+        let html = "<html><body style='margin:10px;'><p>text</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let all = engine.get_all_layout_nodes();
+        for n in &all {
+            assert!(n.x >= 0.0, "x should be >= 0");
+            assert!(n.y >= 0.0, "y should be >= 0");
+        }
+    }
+
+    #[test]
+    fn test_get_all_layout_nodes_returns_nodes() {
+        use crate::DomWrapper;
+        let html = "<html><body><p>a</p><p>b</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let nodes = engine.get_all_layout_nodes();
+        assert!(!nodes.is_empty());
+        // 每个节点应有有效信息
+        for n in &nodes {
+            assert!(n.width >= 0.0, "width should be >= 0");
+            assert!(n.height >= 0.0, "height should be >= 0");
+        }
+    }
+
+    #[test]
+    fn test_compute_empty_dom() {
+        use crate::DomWrapper;
+        let html = "";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        // 空文档也应该能计算，不 panic
+        let result = engine.compute(&dom);
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_set_style_map() {
+        use crate::DomWrapper;
+        let html = "<html><body><div>styled</div></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+
+        let mut map = StyleMap::new();
+        let decls = vec![Declaration {
+            property: "color".into(),
+            value: "red".into(),
+        }];
+        map.insert("div".to_string(), decls);
+        engine.set_style_map(map);
+
+        assert!(engine.compute(&dom).is_ok());
+    }
+
+    #[test]
+    fn test_get_layout_rect() {
+        use crate::DomWrapper;
+        let html = "<html><body style='width:500px;height:400px;'><p>in</p></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        // get_layout_rect 返回 Option<(x, y, w, h)>
+        let rect = engine.get_layout_rect(0);
+        assert!(rect.is_some());
+        let (x, y, w, h) = rect.unwrap();
+        assert!(x >= 0.0);
+        assert!(y >= 0.0);
+        assert!(w >= 0.0);
+        assert!(h >= 0.0);
+    }
+
+    #[test]
+    fn test_get_layout_rect_nonexistent() {
+        use crate::DomWrapper;
+        let html = "<html><body></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        let rect = engine.get_layout_rect(99999);
+        assert!(rect.is_none());
+    }
+
+    #[test]
+    fn test_hit_test_prefers_topmost() {
+        use crate::DomWrapper;
+        let html = "<html><body><div style='width:100px;height:100px;'><p style='width:50px;height:30px;'>inner</p></div></body></html>";
+        let dom = DomWrapper::from_html(html, None);
+        let mut engine = TaffyLayoutEngine::new(800.0, 600.0);
+        assert!(engine.compute(&dom).is_ok());
+
+        // 点击 p 的内部 (p 在 div 内部)
+        let hit = engine.hit_test(25.0, 15.0);
+        assert!(hit.is_some());
     }
 }

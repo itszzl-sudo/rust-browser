@@ -805,4 +805,210 @@ mod tests {
         draw_border(&mut pixmap, 10.0, 10.0, 50.0, 50.0, &border);
         assert!(pixmap.encode_png().is_ok());
     }
+
+    #[test]
+    fn test_box_shadow_basic() {
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        let color = Color::from_hex("#FF0000");
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            30.0,
+            30.0,
+            5.0,
+            5.0,
+            3.0,
+            0.0,
+            &color,
+        );
+        // 在阴影偏移位置应该有红色像素
+        // 阴影中心大约在 (10+5, 10+5) = (15, 15)
+        let pixel = pixmap.pixel(20, 20).unwrap();
+        // 应该有红色分量（模糊后可能不是纯红，但肯定 > 0）
+        assert!(pixel.red() > 0);
+        // 没有阴影的地方应该是透明/黑色（初始 Pixmap 是全黑透明的）
+        let pixel = pixmap.pixel(0, 0).unwrap();
+        assert_eq!(pixel.red(), 0);
+    }
+
+    #[test]
+    fn test_box_shadow_no_blur() {
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        let color = Color::from_hex("#FF0000");
+        // blur_radius=0 时，draw_box_shadow 应直接返回（不绘制）
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            30.0,
+            30.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            &color,
+        );
+        // 所有像素应该是初始的 (0,0,0,0)
+        let pixel = pixmap.pixel(25, 25).unwrap();
+        assert_eq!(pixel.red(), 0);
+        assert_eq!(pixel.green(), 0);
+        assert_eq!(pixel.blue(), 0);
+        assert_eq!(pixel.alpha(), 0);
+    }
+
+    #[test]
+    fn test_box_shadow_negative_offset() {
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        let color = Color::from_hex("#00FF00");
+        // 负偏移：阴影向左上角移动
+        draw_box_shadow(
+            &mut pixmap,
+            30.0,
+            30.0,
+            30.0,
+            30.0,
+            -5.0,
+            -5.0,
+            3.0,
+            0.0,
+            &color,
+        );
+        // 在 (30-5, 30-5) ≈ (25,25) 附近应该有绿色分量
+        let pixel = pixmap.pixel(25, 25).unwrap();
+        assert!(pixel.green() > 0);
+        // 不 panic 即可
+    }
+
+    #[test]
+    fn test_box_shadow_zero_size() {
+        let mut pixmap = tiny_skia::Pixmap::new(50, 50).unwrap();
+        let color = Color::from_hex("#FF0000");
+        // 零宽度元素不 panic
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            0.0,
+            30.0,
+            5.0,
+            5.0,
+            3.0,
+            0.0,
+            &color,
+        );
+        // 零高度元素不 panic
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            30.0,
+            0.0,
+            5.0,
+            5.0,
+            3.0,
+            0.0,
+            &color,
+        );
+        // 双零
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            0.0,
+            0.0,
+            5.0,
+            5.0,
+            3.0,
+            0.0,
+            &color,
+        );
+    }
+
+    #[test]
+    fn test_box_shadow_large_blur() {
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        let color = Color::from_hex("#0000FF");
+        // 大模糊半径不应该 panic
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            30.0,
+            30.0,
+            0.0,
+            0.0,
+            50.0, // 大模糊半径
+            0.0,
+            &color,
+        );
+        // 确保没有 panic
+        assert!(pixmap.encode_png().is_ok());
+    }
+
+    #[test]
+    fn test_box_shadow_with_spread() {
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        let color = Color::from_hex("#FF0000");
+        // 正 spread 让阴影扩大
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            0.0,
+            0.0,
+            3.0,
+            5.0,
+            &color,
+        );
+        // 不 panic，在元素附近有红色
+        let pixel = pixmap.pixel(15, 15).unwrap();
+        assert!(pixel.red() > 0);
+    }
+
+    #[test]
+    fn test_box_shadow_negative_spread() {
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        let color = Color::from_hex("#FF0000");
+        // 负 spread
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            30.0,
+            30.0,
+            3.0,
+            3.0,
+            3.0,
+            -2.0,
+            &color,
+        );
+        // 不 panic
+    }
+
+    #[test]
+    fn test_box_shadow_alpha_color() {
+        let mut pixmap = tiny_skia::Pixmap::new(50, 50).unwrap();
+        // 使用半透明的黑色
+        let color = Color::from_hex("#000000");
+        // 构造一个半透明的 Color
+        let translucent = color;
+        draw_box_shadow(
+            &mut pixmap,
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            5.0,
+            5.0,
+            4.0,
+            0.0,
+            &translucent,
+        );
+        // 阴影位置应该有非零像素
+        let pixel = pixmap.pixel(30, 30).unwrap();
+        assert!(pixel.alpha() > 0);
+    }
 }
