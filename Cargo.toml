@@ -45,6 +45,15 @@ tokio = { version = "1", features = ["full"] }
 
 cssparser = "0.35"
 selectors = "0.27"
+
+# 原生窗口覆盖层（跳过 egui，GDI 直接渲染 RGBA 像素）
+raw-window-handle = { version = "0.6", optional = true }
+windows-sys = { version = "0.52", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+] }
 precomputed-hash = "0.1"
 
 log = "0.4"
@@ -112,7 +121,7 @@ v8 = ["deno_core"]
 
 # ── GUI（仅浏览器模式） ──
 
-gui = ["eframe", "egui"]
+gui = ["eframe", "egui", "raw-window-handle", "windows-sys"]
 
 # ── 向后兼容 ──
 

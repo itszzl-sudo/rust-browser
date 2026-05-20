@@ -10,6 +10,7 @@
 
 use clap::Parser;
 use log::{error, info};
+use raw_window_handle::HasWindowHandle;
 use rust_browser::browser_process::host::BrowserProcessHost;
 use rust_browser::task_queue::GLOBAL_SCHEDULER;
 use std::path::PathBuf;
@@ -69,8 +70,8 @@ struct BrowserApp {
     active_renderer_id: Option<u64>,
     /// URL 输入框内容
     url_input: String,
-    /// 渲染的页面图像
-    image_data: Option<egui::ColorImage>,
+    /// RGBA 像素数据（直接传给 GDI 覆盖层，不经过 egui）
+    rgba_pixels: Option<(u32, u32, Vec<u8>)>,
     /// 错误信息
     error_message: Option<String>,
     /// 初始 URL
@@ -131,7 +132,7 @@ impl BrowserApp {
             browser_host: Some(browser_host),
             active_renderer_id: renderer_id,
             url_input: initial_url.clone(),
-            image_data: None,
+            rgba_pixels: None,
             error_message: None,
             is_loading: false,
             first_frame: true,
@@ -173,16 +174,16 @@ impl BrowserApp {
                 let h = result.height;
                 let pixels = result.rgba_data;
 
-                // 直接使用 RGBA 像素，跳过 PNG 解码
-                self.image_data = Some(egui::ColorImage::from_rgba_unmultiplied(
-                    [w as usize, h as usize],
-                    &pixels,
-                ));
+                // 保存 RGBA 像素，通过 GDI 覆盖层显示（不经过 egui）
+                self.rgba_pixels = Some((w, h, pixels));
                 self.error_message = None;
                 self.is_loading = false;
                 if let Some(ref title) = result.title {
                     add_log_message(format!("页面标题: {}", title));
                 }
+
+                // 推送到 GDI 覆盖层窗口
+                self.push_to_gdi_overlay();
             }
         }
     }
@@ -247,9 +248,198 @@ impl BrowserApp {
     }
 }
 
+// 全局覆盖层窗口句柄和父窗口句柄
+#[cfg(feature = "gui")]
+static OVERLAY_HWND: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "gui")]
+static PARENT_HWND: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "gui")]
+unsafe extern "system" fn overlay_wndproc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    match msg {
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => 1,
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+            windows_sys::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize
+        }
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_DESTROY => 0,
+        _ => windows_sys::Win32::UI::WindowsAndMessaging::DefWindowProcA(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(feature = "gui")]
+impl BrowserApp {
+    /// 创建 GDI 覆盖层窗口（无边框、透明、点击穿透）
+    fn ensure_gdi_overlay(&self, parent_hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+        let mut overlay = OVERLAY_HWND.lock().unwrap();
+        if overlay.is_some() {
+            // 已有窗口，只更新位置
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                    overlay.unwrap() as isize,
+                    0, // HWND_TOP
+                    x,
+                    y,
+                    w,
+                    h,
+                    windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+                );
+            }
+            return;
+        }
+
+        unsafe {
+            let instance =
+                windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(std::ptr::null());
+            let class_name = windows_sys::core::s!("RustBrowserOverlay");
+
+            let wc = windows_sys::Win32::UI::WindowsAndMessaging::WNDCLASSA {
+                style: windows_sys::Win32::UI::WindowsAndMessaging::CS_HREDRAW
+                    | windows_sys::Win32::UI::WindowsAndMessaging::CS_VREDRAW,
+                lpfnWndProc: Some(overlay_wndproc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: instance,
+                hIcon: Default::default(),
+                hCursor: Default::default(),
+                hbrBackground: Default::default(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class_name,
+            };
+            windows_sys::Win32::UI::WindowsAndMessaging::RegisterClassA(&wc);
+
+            let new_hwnd = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExA(
+                windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_LAYERED
+                    | windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT
+                    | windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE
+                    | windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW,
+                class_name,
+                std::ptr::null(),
+                windows_sys::Win32::UI::WindowsAndMessaging::WS_POPUP,
+                x,
+                y,
+                w,
+                h,
+                parent_hwnd,
+                Default::default(),
+                instance,
+                Default::default(),
+            );
+
+            if new_hwnd != 0 {
+                *overlay = Some(new_hwnd as isize);
+                *PARENT_HWND.lock().unwrap() = Some(parent_hwnd);
+                windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
+                    new_hwnd,
+                    windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE,
+                );
+                add_log_message("GDI 覆盖层窗口已创建".to_string());
+            }
+        }
+    }
+
+    /// 通过 UpdateLayeredWindow 推送 RGBA 到覆盖层
+    fn push_to_gdi_overlay(&self) {
+        let (w, h, ref rgba) = match self.rgba_pixels {
+            Some(ref p) => p.clone(),
+            None => return,
+        };
+
+        let overlay_hwnd = match *OVERLAY_HWND.lock().unwrap() {
+            Some(h) => h as isize,
+            None => return,
+        };
+
+        unsafe {
+            let bi = windows_sys::Win32::Graphics::Gdi::BITMAPINFO {
+                bmiHeader: windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER>(
+                    ) as u32,
+                    biWidth: w as i32,
+                    biHeight: -(h as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [windows_sys::Win32::Graphics::Gdi::RGBQUAD {
+                    rgbBlue: 0,
+                    rgbGreen: 0,
+                    rgbRed: 0,
+                    rgbReserved: 0,
+                }],
+            };
+
+            let hdc = windows_sys::Win32::Graphics::Gdi::GetDC(Default::default());
+            if hdc != 0 {
+                let mem_dc = windows_sys::Win32::Graphics::Gdi::CreateCompatibleDC(hdc);
+                if mem_dc != 0 {
+                    // RGBA → BGRA 转换
+                    let mut bgra = rgba.clone();
+                    for chunk in bgra.chunks_exact_mut(4) {
+                        chunk.swap(0, 2);
+                    }
+
+                    let mut bits = std::ptr::null_mut();
+                    let hbitmap = windows_sys::Win32::Graphics::Gdi::CreateDIBSection(
+                        mem_dc,
+                        &bi,
+                        windows_sys::Win32::Graphics::Gdi::DIB_RGB_COLORS,
+                        &mut bits,
+                        Default::default(),
+                        0,
+                    );
+
+                    if hbitmap != 0 {
+                        std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, bgra.len());
+                        let old = windows_sys::Win32::Graphics::Gdi::SelectObject(mem_dc, hbitmap);
+                        let blend = windows_sys::Win32::Graphics::Gdi::BLENDFUNCTION {
+                            BlendOp: windows_sys::Win32::Graphics::Gdi::AC_SRC_OVER as u8,
+                            BlendFlags: 0,
+                            SourceConstantAlpha: 255,
+                            AlphaFormat: windows_sys::Win32::Graphics::Gdi::AC_SRC_ALPHA as u8,
+                        };
+                        let pt_zero = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                        let size = windows_sys::Win32::Foundation::SIZE {
+                            cx: w as i32,
+                            cy: h as i32,
+                        };
+
+                        windows_sys::Win32::UI::WindowsAndMessaging::UpdateLayeredWindow(
+                            overlay_hwnd,
+                            mem_dc,
+                            std::ptr::null_mut(),
+                            &size as *const _ as *mut _,
+                            mem_dc,
+                            &pt_zero as *const _ as *mut _,
+                            0,
+                            &blend as *const _ as *mut _,
+                            windows_sys::Win32::UI::WindowsAndMessaging::ULW_ALPHA,
+                        );
+
+                        windows_sys::Win32::Graphics::Gdi::SelectObject(mem_dc, old);
+                        windows_sys::Win32::Graphics::Gdi::DeleteObject(hbitmap);
+                    }
+                    windows_sys::Win32::Graphics::Gdi::DeleteDC(mem_dc);
+                }
+                windows_sys::Win32::Graphics::Gdi::ReleaseDC(Default::default(), hdc);
+            }
+        }
+    }
+}
+
 #[cfg(feature = "gui")]
 impl eframe::App for BrowserApp {
-    fn ui(&mut self, ctx: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ctx: &mut egui::Ui, frame: &mut eframe::Frame) {
         // ── 首帧初始化 ──
         if self.first_frame {
             self.first_frame = false;
@@ -257,13 +447,32 @@ impl eframe::App for BrowserApp {
             info!("首帧渲染完成，窗口已显示");
             self.is_loading = true;
             self.load_start_time = Some(Instant::now());
+
+            // 创建 GDI 覆盖层窗口（在 egui 下方显示页面内容）
+            if let Ok(handle) = frame.window_handle() {
+                use raw_window_handle::RawWindowHandle;
+                match handle.as_ref() {
+                    RawWindowHandle::Win32(w32) => {
+                        let hwnd = w32.hwnd.get() as isize;
+                        let ui_bar_h = 80i32;
+                        self.ensure_gdi_overlay(
+                            hwnd,
+                            0,
+                            ui_bar_h,
+                            self.width as i32,
+                            (self.height as i32).saturating_sub(ui_bar_h),
+                        );
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // 每帧尝试接收渲染结果
         self.refresh_from_renderer();
 
         // 清除首帧自动加载标记（收到渲染帧后设置为false）
-        if self.image_data.is_some() {
+        if self.rgba_pixels.is_some() {
             self.auto_load_pending = false;
         }
 
@@ -506,75 +715,24 @@ impl eframe::App for BrowserApp {
         }
 
         // ═══════════════════════════════════════════
-        // 中央面板：页面显示
+        // 状态栏（页面通过 GDI 覆盖层显示，不在 egui 中渲染）
         // ═══════════════════════════════════════════
         egui::CentralPanel::default().show(ctx, |ui| {
-            // 自动撑满可用空间
-            let available = ui.available_size();
-            ui.set_min_size(available);
-
-            if let Some(error) = &self.error_message {
-                ui.centered_and_justified(|ui| {
+            ui.horizontal(|ui| {
+                if self.is_loading {
+                    ui.label("⏳ 加载中...");
+                } else if let Some(ref error) = self.error_message {
                     ui.label(
                         egui::RichText::new(error)
                             .color(egui::Color32::RED)
-                            .size(18.0),
+                            .size(14.0),
                     );
-                });
-            } else if let Some(image_data) = &self.image_data {
-                let img_size = egui::vec2(image_data.width() as f32, image_data.height() as f32);
-                let texture = ctx.load_texture(
-                    "browser_content",
-                    image_data.clone(),
-                    egui::TextureOptions::default(),
-                );
-
-                let available = ui.available_size();
-                let (rect, _) = ui.allocate_exact_size(available, egui::Sense::click());
-
-                // 等比例缩放显示，居中
-                let scale = (available.x / img_size.x)
-                    .min(available.y / img_size.y)
-                    .min(1.0);
-                let scaled_size = img_size * scale;
-                let offset = egui::vec2(
-                    (available.x - scaled_size.x).max(0.0) * 0.5,
-                    (available.y - scaled_size.y).max(0.0) * 0.5,
-                );
-                let image_rect = egui::Rect::from_min_size(rect.min + offset, scaled_size);
-
-                let click_resp = ui.interact(rect, ui.next_auto_id(), egui::Sense::click());
-                if click_resp.clicked_by(egui::PointerButton::Primary) {
-                    if let Some(pos) = ctx.pointer_interact_pos() {
-                        // 将点击坐标映射到图像坐标系
-                        let img_x =
-                            ((pos.x - image_rect.min.x) / scaled_size.x * img_size.x).max(0.0);
-                        let img_y =
-                            ((pos.y - image_rect.min.y) / scaled_size.y * img_size.y).max(0.0);
-                        if let Some(ref host) = self.browser_host {
-                            add_log_message(format!("页面点击: ({:.0}, {:.0})", img_x, img_y));
-                            let _ = host.send_input(
-                                rust_browser::browser_process::interfaces::InputEvent::MouseClick {
-                                    x: img_x,
-                                    y: img_y,
-                                    button: 0,
-                                },
-                            );
-                        }
-                    }
+                } else if self.rgba_pixels.is_some() {
+                    ui.label("✓");
+                } else {
+                    ui.label("输入 URL 后按 Enter");
                 }
-
-                ui.put(image_rect, egui::Image::new(&texture));
-            } else if self.auto_load_pending || self.is_loading {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Rust Browser (Chrome 架构) - 初始化中...");
-                });
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.heading("Rust Browser");
-                    ui.label("输入 URL 并按 Enter 开始浏览");
-                });
-            }
+            });
         });
 
         // ── 键盘事件：Enter 导航 ──

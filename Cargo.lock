@@ -4741,6 +4741,7 @@ dependencies = [
  "log",
  "parking_lot",
  "precomputed-hash",
+ "raw-window-handle",
  "regex",
  "reqwest",
  "resvg",
@@ -4753,6 +4754,7 @@ dependencies = [
  "url",
  "urlencoding",
  "usvg",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
