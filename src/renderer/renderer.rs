@@ -270,6 +270,30 @@ impl Renderer {
         Ok((vp_w, vp_h, data))
     }
 
+    /// 简化的 RGBA 渲染（用于截图模式）
+    pub fn render_to_rgba_simple(&mut self) -> Result<(u32, u32, Vec<u8>), RenderError> {
+        self.is_loading = true;
+        let doc = self.document.take();
+
+        let (vp_w, vp_h) = self.context.viewport();
+
+        // 背景填充
+        self.painter.set_background(Color::WHITE);
+        self.painter.paint();
+
+        if let Some(ref d) = doc {
+            // 不设置裁剪，完整渲染
+            self.render_document(d)?;
+        } else {
+            self.render_blank_page()?;
+        }
+
+        let data = self.painter.pixmap().data().to_vec();
+        self.document = doc;
+        self.is_loading = false;
+        Ok((vp_w, vp_h, data))
+    }
+
     /// 带滚动偏移的文档渲染
     fn render_document_with_scroll(
         &mut self,

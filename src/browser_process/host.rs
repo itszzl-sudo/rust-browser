@@ -465,8 +465,8 @@ fn run_renderer_process(
                     // 保存文档到渲染器
                     let title = doc.title.clone();
                     renderer.set_document(doc);
-                    // 使用带滚动支持的渲染方式（首次渲染 scroll_y = 0）
-                    match renderer.render_to_rgba_with_scroll() {
+                    // 使用简单渲染方式（不设置裁剪，完整渲染）
+                    match renderer.render_to_rgba_simple() {
                         Ok((w, h, rgba)) => {
                             let result = RenderResultRgba {
                                 rgba_data: rgba,
