@@ -6,7 +6,7 @@
 
 use crate::css::values::Color;
 use log::trace;
-use tiny_skia::{IntRect, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 /// 裁剪矩形
 #[derive(Debug, Clone, Copy)]

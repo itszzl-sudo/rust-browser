@@ -2,7 +2,7 @@
 //!
 //! 测试浏览器引擎对真实网页的支持
 
-use rust_browser::{NetworkClient, DomWrapper};
+use rust_browser::{DomWrapper, NetworkClient};
 
 #[tokio::main]
 async fn main() {
@@ -23,9 +23,10 @@ async fn test_network_request() {
     // 测试 1: 简单网页请求
     println!("\n1.1 请求 https://example.com ...");
     match client.fetch_html("https://example.com").await {
-        Ok(html) => {
+        Ok((html, url)) => {
             println!("✓ 请求成功!");
             println!("  - HTML 长度: {} 字符", html.len());
+            println!("  - URL: {}", url);
             println!("  - 前 100 字符: {}...", &html[..html.len().min(100)]);
         }
         Err(e) => {
@@ -36,9 +37,10 @@ async fn test_network_request() {
     // 测试 2: 百度首页
     println!("\n1.2 请求 https://www.baidu.com ...");
     match client.fetch_html("https://www.baidu.com").await {
-        Ok(html) => {
+        Ok((html, url)) => {
             println!("✓ 请求成功!");
             println!("  - HTML 长度: {} 字符", html.len());
+            println!("  - URL: {}", url);
             println!("  - 前 150 字符: {}...", &html[..html.len().min(150)]);
         }
         Err(e) => {
@@ -52,7 +54,7 @@ async fn test_network_request() {
         Ok(response) => {
             println!("✓ 响应状态: {}", response.status);
             println!("  - 内容长度: {} 字节", response.body.len());
-            println!("  - URL: {}", response.url);
+            println!("  - URL: {}", response.final_url);
         }
         Err(e) => {
             println!("✗ 请求失败: {}", e);
@@ -71,7 +73,7 @@ async fn test_html_parsing() {
         Ok(html) => {
             println!("\n2.1 解析 HTML 文档 ...");
 
-            let dom = DomWrapper::from_html(&html, Some("https://example.com"));
+            let dom = DomWrapper::from_html(&html.0, Some("https://example.com"));
 
             println!("✓ DOM 树创建成功!");
             println!("  - 文档节点: {:?}", dom.document());

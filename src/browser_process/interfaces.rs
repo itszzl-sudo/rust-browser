@@ -76,6 +76,19 @@ impl ResizeMessage {
         let data = format!("{}|{}", self.width, self.height).into_bytes();
         Message::new("Resize").with_data(data)
     }
+
+    /// 从 Mojo 消息反序列化
+    pub fn from_message(msg: &Message) -> Option<Self> {
+        let s = String::from_utf8_lossy(&msg.data);
+        let parts: Vec<&str> = s.split('|').collect();
+        if parts.len() >= 2 {
+            let w: u32 = parts[0].parse().ok()?;
+            let h: u32 = parts[1].parse().ok()?;
+            Some(Self { width: w, height: h })
+        } else {
+            None
+        }
+    }
 }
 
 /// Navigation 接口代理（浏览器进程使用，负责发送导航请求）
@@ -112,16 +125,18 @@ pub struct RenderResultMessage {
     pub height: u32,
     /// 页面标题（可选）
     pub title: Option<String>,
+    /// 是否为加载中帧
+    pub is_loading: bool,
 }
 
 impl RenderResultMessage {
     /// 序列化为 Mojo 消息
     ///
-    /// 格式: `[header_len:4byteBE][widthxheight|title][png_bytes]`
+    /// 格式: `[header_len:4byteBE][widthxheight|is_loading|title][png_bytes]`
     /// 使用长度前缀避免 PNG 二进制数据中的字节干扰分隔符
     pub fn to_message(&self) -> Message {
         let title = self.title.as_deref().unwrap_or("");
-        let header = format!("{}x{}|{}", self.width, self.height, title);
+        let header = format!("{}x{}|{}|{}", self.width, self.height, self.is_loading, title);
         let header_bytes = header.as_bytes();
 
         // 4 字节大端头部长度 + 头部文本 + PNG 数据
@@ -151,11 +166,12 @@ impl RenderResultMessage {
 
         let header = std::str::from_utf8(header_bytes).ok()?;
         let parts: Vec<&str> = header.split('|').collect();
-        if parts.len() >= 2 {
+        if parts.len() >= 3 {
             let dims: Vec<&str> = parts[0].split('x').collect();
             if dims.len() == 2 {
-                let title = if parts.len() >= 2 {
-                    let t = parts[1..].join("|");
+                let is_loading = parts[1].parse::<bool>().unwrap_or(false);
+                let title = if parts.len() >= 3 {
+                    let t = parts[2..].join("|");
                     if t.is_empty() {
                         None
                     } else {
@@ -169,6 +185,7 @@ impl RenderResultMessage {
                     width: dims[0].parse().unwrap_or(0),
                     height: dims[1].parse().unwrap_or(0),
                     title,
+                    is_loading,
                 });
             }
         }
@@ -255,19 +272,24 @@ pub struct RenderResultRgba {
     pub height: u32,
     /// 页面标题（可选）
     pub title: Option<String>,
+    /// 是否为加载中帧
+    pub is_loading: bool,
 }
 
 impl RenderResultRgba {
-    /// 序列化为 Mojo 消息
-    /// 格式: `[header_len:4byteBE][widthxheight|title][rgba_bytes]`
-    pub fn to_message(&self) -> Message {
-        let title = self.title.as_deref().unwrap_or("");
-        let header = format!("{}x{}|RGBA|{}", self.width, self.height, title);
+    /// 序列化为 Mojo 消息（零拷贝：直接将 rgba_data Build 进 Message）
+    /// 格式: `[header_len:4byteBE][widthxheight|RGBA|is_loading|title][rgba_bytes]`
+    pub fn into_message(mut self) -> Message {
+        let title = self.title.take().unwrap_or_default();
+        let header = format!("{}x{}|RGBA|{}|{}", self.width, self.height, self.is_loading, title);
         let header_bytes = header.as_bytes();
+        // 直接在 rgba_data 前面插入 header，零拷贝（仅 header 部分新建）
         let mut data = Vec::with_capacity(4 + header_bytes.len() + self.rgba_data.len());
         data.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
         data.extend_from_slice(header_bytes);
-        data.extend_from_slice(&self.rgba_data);
+        // 将 rgba_data 拼到 header 后面——这是唯一的大块数据拷贝
+        // 由于 Message 要求连续缓冲区，无法完全避免
+        data.append(&mut self.rgba_data);
         Message::new("FramePaintedRGBA").with_data(data)
     }
 
@@ -285,11 +307,12 @@ impl RenderResultRgba {
         let rgba_data = &msg.data[4 + header_len..];
         let header = std::str::from_utf8(header_bytes).ok()?;
         let parts: Vec<&str> = header.split('|').collect();
-        if parts.len() >= 3 && parts[1] == "RGBA" {
+        if parts.len() >= 4 && parts[1] == "RGBA" {
             let dims: Vec<&str> = parts[0].split('x').collect();
             if dims.len() == 2 {
-                let title = if parts.len() >= 3 {
-                    let t = parts[2..].join("|");
+                let is_loading = parts[2].parse::<bool>().unwrap_or(false);
+                let title = if parts.len() >= 4 {
+                    let t = parts[3..].join("|");
                     if t.is_empty() {
                         None
                     } else {
@@ -303,6 +326,7 @@ impl RenderResultRgba {
                     width: dims[0].parse().unwrap_or(0),
                     height: dims[1].parse().unwrap_or(0),
                     title,
+                    is_loading,
                 });
             }
         }
@@ -346,12 +370,32 @@ mod tests {
             width: 800,
             height: 600,
             title: Some("Test Page".to_string()),
+            is_loading: false,
         };
         let m = msg.to_message();
         let decoded = RenderResultMessage::from_message(&m).unwrap();
         assert_eq!(decoded.width, 800);
         assert_eq!(decoded.height, 600);
         assert_eq!(decoded.title, Some("Test Page".to_string()));
+        assert_eq!(decoded.is_loading, false);
+        assert_eq!(decoded.png_data, vec![0x89, 0x50, 0x4e, 0x47]);
+    }
+
+    #[test]
+    fn test_render_result_message_loading_roundtrip() {
+        let msg = RenderResultMessage {
+            png_data: vec![0x89, 0x50, 0x4e, 0x47],
+            width: 800,
+            height: 600,
+            title: Some("加载中…".to_string()),
+            is_loading: true,
+        };
+        let m = msg.to_message();
+        let decoded = RenderResultMessage::from_message(&m).unwrap();
+        assert_eq!(decoded.width, 800);
+        assert_eq!(decoded.height, 600);
+        assert_eq!(decoded.title, Some("加载中…".to_string()));
+        assert_eq!(decoded.is_loading, true);
         assert_eq!(decoded.png_data, vec![0x89, 0x50, 0x4e, 0x47]);
     }
 
@@ -368,12 +412,14 @@ mod tests {
             width: 100,
             height: 200,
             title: None,
+            is_loading: false,
         };
         let m = msg.to_message();
         let decoded = RenderResultMessage::from_message(&m).unwrap();
         assert_eq!(decoded.width, 100);
         assert_eq!(decoded.height, 200);
         assert_eq!(decoded.title, None);
+        assert_eq!(decoded.is_loading, false);
         assert_eq!(decoded.png_data, png_with_newlines);
     }
 
@@ -385,12 +431,14 @@ mod tests {
             width: 1920,
             height: 1080,
             title: Some("百度一下，你就知道".to_string()),
+            is_loading: false,
         };
         let m = msg.to_message();
         let decoded = RenderResultMessage::from_message(&m).unwrap();
         assert_eq!(decoded.width, 1920);
         assert_eq!(decoded.height, 1080);
         assert_eq!(decoded.title, Some("百度一下，你就知道".to_string()));
+        assert_eq!(decoded.is_loading, false);
         assert_eq!(decoded.png_data, vec![0x89, 0x50, 0x4e, 0x47]);
     }
 
@@ -402,7 +450,7 @@ mod tests {
             button: 0,
         };
         let m = event.to_message();
-        assert_eq!(m.name, "MouseClick");
+        assert_eq!(m.name.as_str(), "MouseClick");
         let data = String::from_utf8_lossy(&m.data);
         assert_eq!(data, "100|200|0");
     }

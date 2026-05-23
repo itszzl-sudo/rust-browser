@@ -23,6 +23,10 @@ pub struct LayoutResult {
 }
 
 /// 布局引擎
+///
+/// ⚠️ 已废弃：此实现已被 `TaffyLayoutEngine` 替代。
+/// 请使用 `crate::renderer::taffy_layout::TaffyLayoutEngine` 代替。
+#[deprecated(note = "已被 TaffyLayoutEngine 替代，请使用 taffy_layout 模块")]
 pub struct LayoutEngine {
     /// 节点映射
     node_map: Vec<usize>,
@@ -32,6 +36,7 @@ pub struct LayoutEngine {
 
 impl LayoutEngine {
     /// 创建新的布局引擎
+    #[allow(deprecated)]
     pub fn new() -> Self {
         info!("初始化布局引擎");
         Self {
@@ -41,12 +46,20 @@ impl LayoutEngine {
     }
 
     /// 计算布局
-    pub fn compute(&mut self, tree: &DomTree, _stylesheet: &crate::css::stylesheet::Stylesheet, viewport: (u32, u32)) -> Result<(), String> {
+    ///
+    /// ⚠️ 已废弃：此实现已被 `TaffyLayoutEngine` 替代。
+    #[allow(deprecated)]
+    pub fn compute(
+        &mut self,
+        tree: &DomTree,
+        _stylesheet: &crate::css::stylesheet::Stylesheet,
+        viewport: (u32, u32),
+    ) -> Result<(), String> {
         debug!("计算布局: {:?}", viewport);
-        
+
         self.node_map.clear();
         self.results.clear();
-        
+
         // 简化实现：直接遍历 DOM 树生成布局
         if let Some(root) = tree.root() {
             let mut visitor = LayoutVisitor {
@@ -55,16 +68,18 @@ impl LayoutEngine {
             };
             DomTraverser::pre_order(tree, &mut visitor);
         }
-        
+
         Ok(())
     }
 
     /// 添加布局节点
+    #[allow(deprecated)]
     pub fn add_node(&mut self, dom_index: usize) {
         self.node_map.push(dom_index);
     }
 
     /// 添加布局结果
+    #[allow(deprecated)]
     pub fn add_result(&mut self, node_index: usize, x: f32, y: f32, width: f32, height: f32) {
         self.results.push(LayoutResult {
             node_index,
@@ -76,16 +91,19 @@ impl LayoutEngine {
     }
 
     /// 获取节点的布局
+    #[allow(deprecated)]
     pub fn get_layout(&self, dom_index: usize) -> Option<&LayoutResult> {
         self.results.iter().find(|r| r.node_index == dom_index)
     }
 
     /// 获取布局结果
+    #[allow(deprecated)]
     pub fn results(&self) -> &[LayoutResult] {
         &self.results
     }
 }
 
+#[allow(deprecated)]
 impl Default for LayoutEngine {
     fn default() -> Self {
         Self::new()
@@ -93,16 +111,18 @@ impl Default for LayoutEngine {
 }
 
 /// 布局访问者
+#[allow(deprecated)]
 struct LayoutVisitor<'a> {
     engine: &'a mut LayoutEngine,
     y_offset: f32,
 }
 
+#[allow(deprecated)]
 impl<'a> DomVisitor for LayoutVisitor<'a> {
     fn visit_pre(&mut self, node: &DomNode) {
         if node.is_element() {
             self.engine.add_node(node.index);
-            
+
             // 简单布局：块级元素垂直排列
             if let crate::dom::node::NodeType::Element(data) = &node.node_type {
                 if data.is_block() {
@@ -130,6 +150,7 @@ impl<'a> DomVisitor for LayoutVisitor<'a> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

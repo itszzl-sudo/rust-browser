@@ -29,8 +29,12 @@ use crate::browser::Document;
 use crate::browser_process::interfaces::*;
 use crate::mojo::interface::{InterfaceBinding, InterfaceProxy};
 use crate::renderer::Renderer;
+#[cfg(any(feature = "boa", feature = "v8"))]
+use log::trace;
 use log::{debug, info, warn};
 use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -60,6 +64,12 @@ pub struct RendererChannel {
     pub width: u32,
     /// 视口高度
     pub height: u32,
+    /// 子进程句柄（真实进程模式），None = 线程模式
+    pub child_process: Option<Child>,
+    /// 子进程 stdin 写入端
+    pub child_stdin: Option<Box<dyn Write + Send>>,
+    /// 子进程 stdout 读取端
+    pub child_stdout: Option<Box<dyn BufRead + Send>>,
 }
 
 impl RendererChannel {
@@ -91,7 +101,7 @@ impl RendererChannel {
 /// 浏览器进程宿主 - 管理所有渲染器进程
 ///
 /// 类似 Chrome 的 `BrowserProcessImpl`，负责：
-/// - 为每个标签页创建渲染器线程
+/// - 为每个标签页创建渲染器线程（线程模式）或真实进程（进程模式）
 /// - 通过 Mojo IPC 与渲染器通信
 /// - 转发用户输入事件到活跃渲染器
 /// - 收集渲染结果
@@ -100,6 +110,8 @@ pub struct BrowserProcessHost {
     renderers: HashMap<u64, RendererChannel>,
     /// 当前活跃的标签页 ID
     active_tab_id: Option<u64>,
+    /// 是否使用真实进程隔离（默认 false = 线程模式）
+    pub use_real_process: bool,
 }
 
 impl BrowserProcessHost {
@@ -109,12 +121,14 @@ impl BrowserProcessHost {
         Self {
             renderers: HashMap::new(),
             active_tab_id: None,
+            use_real_process: false,
         }
     }
 
     /// 创建新的渲染器进程并建立 IPC 通道
     ///
-    /// 每个渲染器运行在独立的线程中，通过三条 Mojo 管道与浏览器通信。
+    /// 每个渲染器运行在独立的线程中（`use_real_process = false`，默认）
+    /// 或真实 OS 子进程（`use_real_process = true`）中。
     ///
     /// # 参数
     ///
@@ -127,17 +141,27 @@ impl BrowserProcessHost {
     /// 新创建的渲染器 ID
     pub fn spawn_renderer(&mut self, url: &str, width: u32, height: u32) -> Result<u64, String> {
         let id = NEXT_RENDERER_ID.fetch_add(1, Ordering::SeqCst);
-        info!("创建渲染器进程 #{}: {} ({}x{})", id, url, width, height);
+        if self.use_real_process {
+            self.spawn_real_renderer_process(id, url, width, height)
+        } else {
+            self.spawn_renderer_thread(id, url, width, height)
+        }
+    }
 
-        // 1. 创建三条 Mojo 接口管道
-        //    Navigation:   Browser → Renderer
-        //    InputEvent:   Browser → Renderer
-        //    RenderResult: Renderer → Browser
+    /// 线程模式：创建渲染器线程
+    fn spawn_renderer_thread(
+        &mut self,
+        id: u64,
+        url: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<u64, String> {
+        info!("创建渲染器线程 #{}: {} ({}x{})", id, url, width, height);
+
         let (mut nav_remote, mut nav_receiver) = create_navigation_pipe();
         let (mut input_remote, mut input_receiver) = create_input_event_pipe();
         let (mut result_remote, mut result_receiver) = create_render_result_pipe();
 
-        // 2. 在浏览器端绑定代理/绑定
         let channel = RendererChannel {
             id,
             navigation_remote: nav_remote.bind(),
@@ -147,19 +171,20 @@ impl BrowserProcessHost {
             title: None,
             width,
             height,
+            child_process: None,
+            child_stdin: None,
+            child_stdout: None,
         };
 
-        // 3. 在渲染器端绑定端点（将在新线程中使用）
         let nav_binding = nav_receiver.bind();
         let input_binding = input_receiver.bind();
         let result_proxy = result_remote.bind();
 
-        // 4. 启动渲染器线程
         let renderer_url = url.to_string();
         thread::Builder::new()
             .name(format!("Renderer-{}", id))
             .spawn(move || {
-                info!("渲染器进程 #{} 线程已启动", id);
+                info!("渲染器线程 #{} 已启动", id);
                 run_renderer_process(
                     id,
                     renderer_url,
@@ -172,9 +197,69 @@ impl BrowserProcessHost {
             })
             .map_err(|e| format!("创建渲染器线程失败: {}", e))?;
 
-        // 5. 保存通道并设置为活跃
         self.renderers.insert(id, channel);
         self.active_tab_id = Some(id);
+        Ok(id)
+    }
+
+    /// 真实进程模式：启动 OS 子进程
+    fn spawn_real_renderer_process(
+        &mut self,
+        id: u64,
+        url: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<u64, String> {
+        info!("启动真实渲染器进程 #{}: {} ({}x{})", id, url, width, height);
+
+        let exe_path = std::env::current_exe().map_err(|e| format!("获取可执行路径失败: {}", e))?;
+
+        let mut child = Command::new(&exe_path)
+            .arg("--renderer-process")
+            .arg("--renderer-id")
+            .arg(id.to_string())
+            .arg("--url")
+            .arg(url)
+            .arg("-W")
+            .arg(width.to_string())
+            .arg("-H")
+            .arg(height.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("启动渲染器子进程失败: {}", e))?;
+
+        let child_stdin: Box<dyn Write + Send> = Box::new(
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| "无法获取子进程 stdin".to_string())?,
+        );
+        let child_stdout: Box<dyn BufRead + Send> = Box::new(std::io::BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| "无法获取子进程 stdout".to_string())?,
+        ));
+
+        let channel = RendererChannel {
+            id,
+            navigation_remote: InterfaceProxy::new_invalid(),
+            input_remote: InterfaceProxy::new_invalid(),
+            result_binding: InterfaceBinding::new_invalid(),
+            url: url.to_string(),
+            title: None,
+            width,
+            height,
+            child_process: Some(child),
+            child_stdin: Some(child_stdin),
+            child_stdout: Some(child_stdout),
+        };
+
+        self.renderers.insert(id, channel);
+        self.active_tab_id = Some(id);
+        info!("真实渲染器进程 #{} 已启动", id);
         Ok(id)
     }
 
@@ -199,6 +284,22 @@ impl BrowserProcessHost {
             }
         } else {
             Ok(())
+        }
+    }
+
+    /// 调整指定渲染器的视口大小
+    pub fn resize_renderer(&self, renderer_id: u64, width: u32, height: u32) -> Result<(), String> {
+        match self.renderers.get(&renderer_id) {
+            Some(renderer) => renderer.resize(width, height),
+            None => Err(format!("未找到渲染器 #{}", renderer_id)),
+        }
+    }
+
+    /// 调整活跃渲染器的视口大小
+    pub fn resize_active_renderer(&self, width: u32, height: u32) -> Result<(), String> {
+        match self.active_tab_id {
+            Some(id) => self.resize_renderer(id, width, height),
+            None => Err("没有活跃标签页".to_string()),
         }
     }
 
@@ -228,7 +329,7 @@ impl BrowserProcessHost {
         let renderer = self.renderers.get(&id)?;
 
         if let Some(msg) = renderer.result_binding.try_receive() {
-            if msg.name == "FramePaintedRGBA" {
+            if msg.name.as_str() == "FramePaintedRGBA" {
                 let result = RenderResultRgba::from_message(&msg);
                 if let Some(ref result) = result {
                     if let Some(ref title) = result.title {
@@ -253,6 +354,7 @@ impl BrowserProcessHost {
                 width: r.width,
                 height: r.height,
                 title: r.title,
+                is_loading: r.is_loading,
             })
         } else {
             None
@@ -340,70 +442,76 @@ fn run_renderer_process(
     let mut running = true;
 
     // 首次导航：立即发送 loading 帧，然后异步加载文档并渲染
-    if !current_url.is_empty() {
-        info!("Renderer #{} 首次导航到: {}", id, current_url);
+        if !current_url.is_empty() {
+            info!("Renderer #{} 首次导航到: {}", id, current_url);
 
-        // 第一步：先发送 loading 画面
-        if let Ok(loading_png) = renderer.render_loading_page() {
-            let _ = result_proxy.send_message(
-                RenderResultMessage {
-                    png_data: loading_png,
-                    width,
-                    height,
-                    title: Some(format!("加载中…")),
-                }
-                .to_message(),
-            );
-        }
-
-        // 第二步：加载文档 + 渲染（耗时操作）
-        match load_document(&current_url) {
-            Ok(doc) => {
-                // 保存文档到渲染器
-                let title = doc.title.clone();
-                renderer.set_document(doc);
-                // 优先使用 RGBA 路径（省掉 PNG 编解码）
-                match renderer.render_to_rgba() {
-                    Ok((w, h, rgba)) => {
-                        let result = RenderResultRgba {
-                            rgba_data: rgba,
-                            width: w,
-                            height: h,
-                            title,
-                        };
-                        let _ = result_proxy.send_message(result.to_message());
-                        info!("Renderer #{} 首次渲染完成 (RGBA)", id);
+            // 第一步：先发送 loading 画面
+            if let Ok(loading_png) = renderer.render_loading_page() {
+                let _ = result_proxy.send_message(
+                    RenderResultMessage {
+                        png_data: loading_png,
+                        width,
+                        height,
+                        title: Some(format!("加载中…")),
+                        is_loading: true,
                     }
-                    Err(e) => {
-                        warn!("Renderer #{} 首次渲染失败: {:?}", id, e);
+                    .to_message(),
+                );
+            }
+
+            // 第二步：加载文档 + 渲染（耗时操作）
+            match load_document(&current_url) {
+                Ok(doc) => {
+                    // 保存文档到渲染器
+                    let title = doc.title.clone();
+                    renderer.set_document(doc);
+                    // 使用带滚动支持的渲染方式（首次渲染 scroll_y = 0）
+                    match renderer.render_to_rgba_with_scroll() {
+                        Ok((w, h, rgba)) => {
+                            let result = RenderResultRgba {
+                                rgba_data: rgba,
+                                width: w,
+                                height: h,
+                                title,
+                                is_loading: false,
+                            };
+                            let _ = result_proxy.send_message(result.into_message());
+                            info!(
+                                "Renderer #{} 首次渲染完成 (RGBA), content_height={:.0}",
+                                id, renderer.content_height
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Renderer #{} 首次渲染失败: {:?}", id, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Renderer #{} 首次加载文档失败: {}", id, e);
+                    match renderer.render(&None) {
+                        Ok(png) => {
+                            let result = RenderResultMessage {
+                                png_data: png,
+                                width,
+                                height,
+                                title: Some(format!("加载失败: {}", e)),
+                                is_loading: false,
+                            };
+                            let _ = result_proxy.send_message(result.to_message());
+                        }
+                        Err(e2) => {
+                            warn!("Renderer #{} 空白页渲染也失败: {:?}", id, e2);
+                        }
                     }
                 }
             }
-            Err(e) => {
-                warn!("Renderer #{} 首次加载文档失败: {}", id, e);
-                match renderer.render(&None) {
-                    Ok(png) => {
-                        let result = RenderResultMessage {
-                            png_data: png,
-                            width,
-                            height,
-                            title: Some(format!("加载失败: {}", e)),
-                        };
-                        let _ = result_proxy.send_message(result.to_message());
-                    }
-                    Err(e2) => {
-                        warn!("Renderer #{} 空白页渲染也失败: {:?}", id, e2);
-                    }
-                }
-            }
         }
-    }
 
     // 消息循环: 处理来自浏览器进程的 IPC 消息
     while running {
         // 处理导航消息
         while let Some(msg) = nav_binding.try_receive() {
-            match msg.name {
+            match msg.name.as_str() {
                 "Navigate" => {
                     if let Some(nav) = NavigationMessage::from_message(&msg) {
                         info!("Renderer #{} 导航到: {}", id, nav.url);
@@ -420,47 +528,60 @@ fn run_renderer_process(
                                     width: new_width,
                                     height: new_height,
                                     title: Some(format!("加载中…")),
+                                    is_loading: true,
                                 }
                                 .to_message(),
                             );
                         }
 
-                        // 加载文档 + 渲染
+                        // 加载文档 + 渲染（使用带滚动的渲染，滚动复位到顶部）
                         if let Ok(doc) = load_document(&current_url) {
                             let title = doc.title.clone();
                             renderer.set_document(doc);
-                            if let Ok((w, h, rgba)) = renderer.render_to_rgba() {
+                            renderer.scroll_offset_y = 0.0; // 新页面回到顶部
+                            if let Ok((w, h, rgba)) = renderer.render_to_rgba_with_scroll() {
                                 let result = RenderResultRgba {
                                     rgba_data: rgba,
                                     width: w,
                                     height: h,
                                     title,
+                                    is_loading: false,
                                 };
-                                let _ = result_proxy.send_message(result.to_message());
+                                let _ = result_proxy.send_message(result.into_message());
                             }
                         }
                     }
                 }
                 "Resize" => {
-                    // 解析尺寸变更（格式: width|height）
-                    let s = String::from_utf8_lossy(&msg.data);
-                    let parts: Vec<&str> = s.split('|').collect();
-                    if parts.len() >= 2 {
-                        let w: u32 = parts[0].parse().unwrap_or(width);
-                        let h: u32 = parts[1].parse().unwrap_or(height);
-                        debug!("Renderer #{} resize: {}x{}", id, w, h);
-                        renderer.set_viewport(w, h);
+                    // 解析尺寸变更消息
+                    if let Some(resize) = ResizeMessage::from_message(&msg) {
+                        info!("Renderer #{} resize: {}x{}", id, resize.width, resize.height);
+                        renderer.set_viewport(resize.width, resize.height);
+                        
+                        // 如果有当前文档，重新渲染页面
+                        if renderer.document().is_some() {
+                            if let Ok((w, h, rgba)) = renderer.render_to_rgba_with_scroll() {
+                                let result = RenderResultRgba {
+                                    rgba_data: rgba,
+                                    width: w,
+                                    height: h,
+                                    title: renderer.title().map(|s| s.to_string()),
+                                    is_loading: false,
+                                };
+                                let _ = result_proxy.send_message(result.into_message());
+                            }
+                        }
                     }
                 }
                 _ => {
-                    debug!("Renderer #{} 未知导航消息: {}", id, msg.name);
+                    debug!("Renderer #{} 未知导航消息: {}", id, msg.name.as_str());
                 }
             }
         }
 
         // 处理输入消息
         while let Some(msg) = input_binding.try_receive() {
-            match msg.name.as_ref() {
+            match msg.name.as_str() {
                 "MouseClick" => {
                     // 解析坐标（格式: x|y|button）
                     let s = String::from_utf8_lossy(&msg.data);
@@ -488,6 +609,7 @@ fn run_renderer_process(
                                         width: w,
                                         height: h,
                                         title,
+                                        is_loading: false,
                                     };
                                     let _ = result_proxy.send_message(result.to_message());
                                 }
@@ -541,8 +663,9 @@ fn run_renderer_process(
                                             width: w,
                                             height: h,
                                             title,
+                                            is_loading: false,
                                         };
-                                        let _ = result_proxy.send_message(result.to_message());
+                                        let _ = result_proxy.send_message(result.into_message());
                                     }
                                 }
                             }
@@ -550,7 +673,41 @@ fn run_renderer_process(
                     }
                 }
                 "Scroll" => {
-                    debug!("Renderer #{} Scroll event received", id);
+                    let s = String::from_utf8_lossy(&msg.data);
+                    let parts: Vec<&str> = s.split('|').collect();
+                    if parts.len() >= 2 {
+                        let _delta_x: f32 = parts[0].parse().unwrap_or(0.0);
+                        let delta_y: f32 = parts[1].parse().unwrap_or(0.0);
+                        debug!("Renderer #{} Scroll delta_y={:.0}", id, delta_y);
+
+                        // 更新滚动偏移
+                        let current_offset = renderer.scroll_offset();
+                        let new_offset = current_offset + delta_y;
+                        renderer.set_scroll_offset(new_offset);
+
+                        // 以新的滚动偏移重新渲染
+                        let title = renderer.title().map(|t| t.to_string());
+                        match renderer.render_to_rgba_with_scroll() {
+                            Ok((w, h, rgba)) => {
+                                let result = RenderResultRgba {
+                                    rgba_data: rgba,
+                                    width: w,
+                                    height: h,
+                                    title,
+                                    is_loading: false,
+                                };
+                                let _ = result_proxy.send_message(result.into_message());
+                                info!(
+                                    "Renderer #{} 滚动后重新渲染: scroll_y={:.0}",
+                                    id,
+                                    renderer.scroll_offset()
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Renderer #{} 滚动渲染失败: {:?}", id, e);
+                            }
+                        }
+                    }
                 }
                 "MouseMove" => {
                     let s = String::from_utf8_lossy(&msg.data);
@@ -576,6 +733,7 @@ fn run_renderer_process(
                                             width: w,
                                             height: h,
                                             title,
+                                            is_loading: false,
                                         };
                                         let _ = result_proxy.send_message(result.to_message());
                                     }
@@ -605,8 +763,18 @@ fn run_renderer_process(
                                     "Enter" => {
                                         if tag == "textarea" {
                                             value.push('\n');
+                                        } else {
+                                            // 单行 input 的 Enter 可触发表单提交。
+                                            // 完整实现需要 bridge 层的协作：
+                                            //   1. 定位当前聚焦的 <input> 元素
+                                            //   2. 向上遍历 DOM 查找最近的 <form> 父元素
+                                            //   3. 调用 bridge.handle_form_submit(form_selector)
+                                            // 当前架构中，host.rs 不直接访问 bridge，
+                                            // 且表单提交涉及 JS 事件处理（submit event），
+                                            // 需要由渲染器/桥接器层完成。
+                                            // 此处保留为 keys 事件透传，由上层处理。
+                                            // 参考: bridge_impl::handle_form_submit
                                         }
-                                        // 单行 input 的 Enter 可触发表单提交（暂不实现）
                                     }
                                     _ => {
                                         // 只接受可打印字符（单字符按键）
@@ -634,6 +802,7 @@ fn run_renderer_process(
                                             width: w,
                                             height: h,
                                             title,
+                                            is_loading: false,
                                         };
                                         let _ = result_proxy.send_message(result.to_message());
                                     }
@@ -646,7 +815,7 @@ fn run_renderer_process(
                     }
                 }
                 _ => {
-                    debug!("Renderer #{} 未知输入消息: {}", id, msg.name);
+                    debug!("Renderer #{} 未知输入消息: {}", id, msg.name.as_str());
                 }
             }
         }
@@ -654,6 +823,15 @@ fn run_renderer_process(
         // 检查通道是否关闭（浏览器端已断开连接）
         if nav_binding.port().is_closed() && input_binding.port().is_closed() {
             running = false;
+        }
+
+        // 定时器调度：检查并执行到期的 JS 定时器（setTimeout/setInterval/requestAnimationFrame）
+        #[cfg(any(feature = "boa", feature = "v8"))]
+        {
+            let ticked = renderer.js_engine_tick_timers();
+            if ticked > 0 {
+                trace!("Renderer #{} 触发了 {} 个定时器回调", id, ticked);
+            }
         }
 
         // 避免忙等——10ms 轮询间隔
@@ -673,7 +851,7 @@ fn run_renderer_process(
 /// - `https://` / `http://` 网络资源
 /// - `file://` 本地文件
 /// - `*.html` / `*.htm` 本地 HTML 文件
-fn load_document(url: &str) -> Result<Document, String> {
+pub fn load_document(url: &str) -> Result<Document, String> {
     if url.starts_with("file://")
         || url.ends_with(".html")
         || url.ends_with(".htm")

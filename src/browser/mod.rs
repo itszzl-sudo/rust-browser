@@ -185,6 +185,15 @@ impl Browser {
         }
     }
 
+    pub fn favicon(&self) -> Option<&str> {
+        let active_idx = self.tab_manager.active_index();
+        if active_idx < self.engines.len() {
+            self.engines[active_idx].favicon()
+        } else {
+            None
+        }
+    }
+
     pub fn url(&self) -> &str {
         self.tab_manager
             .active_tab()

@@ -162,12 +162,16 @@ impl Task {
 ///
 /// This is a simplified version — a full implementation would integrate with
 /// the scheduler's timer queue (like Chrome's `base::Timer`).
+#[allow(dead_code)]
 pub struct RepeatingTask {
     /// The underlying task (wrapped for optional cancellation).
     task: Arc<Mutex<Option<Task>>>,
 
     /// Interval between firings.
     interval: std::time::Duration,
+
+    /// Cancellation flag shared with the background thread.
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RepeatingTask {
@@ -175,19 +179,62 @@ impl RepeatingTask {
     ///
     /// The closure is called at (approximately) the given interval until the
     /// task is dropped or cancelled.
-    pub fn new<F>(interval: std::time::Duration, _traits: TaskTraits, _f: F) -> Self
+    ///
+    /// ## Implementation note
+    ///
+    /// The current implementation spawns a dedicated `std::thread` that loops
+    /// with `thread::sleep(interval)` between executions. This is a simple
+    /// approach suitable for periodic housekeeping tasks (e.g. garbage
+    /// collection, metrics reporting).
+    ///
+    /// For a production-quality periodic timer, consider integrating with:
+    ///   - a hierarchical timer wheel (e.g. `tokio`-style timing wheels)
+    ///   - the scheduler's delayed task queue (for unified priority scheduling)
+    ///
+    /// The `TaskHandle` returned (via the `Arc<Mutex<Option<Task>>>`) can be
+    /// used for cancellation: drop the handle or set its `cancelled` flag.
+    pub fn new<F>(interval: std::time::Duration, _traits: TaskTraits, f: F) -> Self
     where
         F: Fn() + Send + 'static,
     {
         let task = Arc::new(Mutex::new(None));
-        // TODO: integrate with a timer wheel or the scheduler's delayed
-        //       task mechanism for proper periodic execution.
-        Self { task, interval }
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+
+        // 启动后台线程按 interval 重复执行回调
+        std::thread::Builder::new()
+            .name(format!("RepeatingTask-{}", _traits.name))
+            .spawn(move || {
+                while !cancelled_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    f();
+                    std::thread::sleep(interval);
+                }
+            })
+            .ok();
+
+        Self {
+            task,
+            interval,
+            cancelled,
+        }
     }
 
     /// Returns the interval between firings.
     pub fn interval(&self) -> std::time::Duration {
         self.interval
+    }
+
+    /// Stops the repeating task.
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for RepeatingTask {
+    fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

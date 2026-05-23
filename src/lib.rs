@@ -24,9 +24,14 @@
 
 pub mod browser;
 pub mod browser_process;
+pub mod cors;
+pub mod csp;
 pub mod css;
 pub mod css_engine;
 pub mod dom_wrapper;
+pub mod http_cache;
+pub mod js_dom_bridge;
+pub mod js_timer_queue;
 
 // JS 引擎：支持 boa（默认，纯 Rust）和 v8（deno_core/V8）两个后端
 // 不带任一 feature 时 = 无 JS 引擎
@@ -36,13 +41,26 @@ pub mod mojo;
 pub mod network;
 pub mod renderer;
 pub mod task_queue;
+pub mod web_storage;
 
 pub mod bridge;
 pub mod bridge_impl;
+pub mod compositor;
+pub mod js_task_scheduler;
+pub mod page_state;
+pub mod resource_scheduler;
+
+// GUI 窗口管理器（winit + softbuffer 跨平台窗口）
+#[cfg(feature = "gui")]
+pub mod gui_window;
 
 pub use browser::{Browser, BrowserEngine, BrowserError, Document, DEFAULT_HOME_URL};
 pub use browser::{Tab, TabManager};
+pub use compositor::CompositorFrame;
 pub use css::values::Color;
 pub use dom_wrapper::DomWrapper;
+pub use js_task_scheduler::JsTaskScheduler;
 pub use network::NetworkClient;
+pub use page_state::{FreezeLevel, PageFreezeState, PageFreezer};
 pub use renderer::Renderer;
+pub use resource_scheduler::{ResourcePriority, ResourceRequest, ResourceScheduler, ResourceType};

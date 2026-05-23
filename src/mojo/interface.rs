@@ -29,7 +29,7 @@
 //!
 //! // Receive it on the other end
 //! let msg = binding.wait_for_message().unwrap();
-//! assert_eq!(msg.name, "DoSomething");
+//! assert_eq!(msg.name.as_str(), "DoSomething");
 //! ```
 
 use crate::mojo::message::Message;
@@ -62,22 +62,30 @@ pub trait MojoInterface: Send + 'static {
 /// endpoint of a message pipe and provides methods for sending messages
 /// belonging to the interface.
 pub struct InterfaceProxy {
-    port: Port,
+    port: Option<Port>,
     interface_name: &'static str,
 }
 
 impl InterfaceProxy {
+    /// 创建一个无效的代理（用于真实进程模式，通过管道直接通信）
+    pub fn new_invalid() -> Self {
+        Self {
+            port: None,
+            interface_name: "",
+        }
+    }
+
     /// Wrap an existing port as an interface proxy.
     pub fn new(port: Port, name: &'static str) -> Self {
         Self {
-            port,
+            port: Some(port),
             interface_name: name,
         }
     }
 
     /// Return a reference to the underlying port.
     pub fn port(&self) -> &Port {
-        &self.port
+        self.port.as_ref().expect("InterfaceProxy not bound")
     }
 
     /// Send a message through this proxy.
@@ -85,14 +93,14 @@ impl InterfaceProxy {
         trace!(
             "InterfaceProxy[{}] sending: {}",
             self.interface_name,
-            msg.name
+            msg.name.as_str()
         );
-        self.port.send(msg)
+        self.port.as_ref().unwrap().send(msg)
     }
 
     /// Return `true` if the underlying port has been closed.
     pub fn is_closed(&self) -> bool {
-        self.port.is_closed()
+        self.port.as_ref().map(|p| p.is_closed()).unwrap_or(true)
     }
 }
 
@@ -106,17 +114,26 @@ impl InterfaceProxy {
 /// message pipe and processes incoming messages either through a callback
 /// handler or by direct polling (e.g. `wait_for_message`).
 pub struct InterfaceBinding {
-    port: Port,
+    port: Option<Port>,
     #[allow(dead_code)]
     interface_name: &'static str,
     handler: Arc<Mutex<Option<Box<dyn Fn(Message) + Send>>>>,
 }
 
 impl InterfaceBinding {
+    /// 创建一个无效的绑定（用于真实进程模式，通过管道直接通信）
+    pub fn new_invalid() -> Self {
+        Self {
+            port: None,
+            interface_name: "",
+            handler: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// Wrap an existing port as an interface binding.
     pub fn new(port: Port, name: &'static str) -> Self {
         Self {
-            port,
+            port: Some(port),
             interface_name: name,
             handler: Arc::new(Mutex::new(None)),
         }
@@ -133,17 +150,17 @@ impl InterfaceBinding {
 
     /// Return a reference to the underlying port.
     pub fn port(&self) -> &Port {
-        &self.port
+        self.port.as_ref().expect("InterfaceBinding not bound")
     }
 
     /// Block the current thread until a message arrives and return it.
     pub fn wait_for_message(&self) -> Result<Message, String> {
-        self.port.receive()
+        self.port.as_ref().unwrap().receive()
     }
 
     /// Attempt to receive a message without blocking.
     pub fn try_receive(&self) -> Option<Message> {
-        self.port.try_receive()
+        self.port.as_ref().and_then(|p| p.try_receive())
     }
 
     /// Process one incoming message using the registered handler.
@@ -151,14 +168,15 @@ impl InterfaceBinding {
     /// Returns `Ok(true)` if a message was handled, `Ok(false)` if no message
     /// was available, or `Err` if the port is closed.
     pub fn dispatch_one(&self) -> Result<bool, String> {
-        if let Some(msg) = self.port.try_receive() {
-            if let Some(ref handler) = *self.handler.lock().unwrap() {
-                handler(msg);
+        if let Some(ref port) = self.port {
+            if let Some(msg) = port.try_receive() {
+                if let Some(ref handler) = *self.handler.lock().unwrap() {
+                    handler(msg);
+                }
+                return Ok(true);
             }
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        Ok(false)
     }
 
     /// Create a connected (proxy, binding) pair for the given interface name.
@@ -287,7 +305,7 @@ mod tests {
 
         proxy.send_message(Message::new("ping")).unwrap();
         let msg = binding.wait_for_message().unwrap();
-        assert_eq!(msg.name, "ping");
+        assert_eq!(msg.name.as_str(), "ping");
     }
 
     #[test]
@@ -299,7 +317,7 @@ mod tests {
 
         proxy.send_message(Message::new("DoSomething")).unwrap();
         let msg = binding.wait_for_message().unwrap();
-        assert_eq!(msg.name, "DoSomething");
+        assert_eq!(msg.name.as_str(), "DoSomething");
     }
 
     #[test]
@@ -309,7 +327,7 @@ mod tests {
 
         let (proxy, mut binding) = InterfaceBinding::make_pair("HandlerTest");
         binding.set_handler(move |msg: Message| {
-            assert_eq!(msg.name, "handle_me");
+            assert_eq!(msg.name.as_str(), "handle_me");
             *handled_clone.lock().unwrap() = true;
         });
 
@@ -333,7 +351,7 @@ mod tests {
 
         proxy.send_message(Message::new("swapped_msg")).unwrap();
         let msg = binding.wait_for_message().unwrap();
-        assert_eq!(msg.name, "swapped_msg");
+        assert_eq!(msg.name.as_str(), "swapped_msg");
     }
 
     #[test]

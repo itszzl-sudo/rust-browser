@@ -18,7 +18,7 @@
 //! let pipe = MessagePipe::new("client", "server");
 //! pipe.endpoint0.send(Message::new("ping")).unwrap();
 //! let msg = pipe.endpoint1.receive().unwrap();
-//! assert_eq!(msg.name, "ping");
+//! assert_eq!(msg.name.as_str(), "ping");
 //! ```
 
 use crate::mojo::message::{Handle, Message};
@@ -110,7 +110,9 @@ impl Port {
         let peer_opt = self.inner.peer.lock().unwrap().clone();
         match peer_opt {
             Some(peer_weak) => {
-                let peer = peer_weak.upgrade().ok_or_else(|| "Peer has been dropped".to_string())?;
+                let peer = peer_weak
+                    .upgrade()
+                    .ok_or_else(|| "Peer has been dropped".to_string())?;
                 let mut q = peer.queue.lock().unwrap();
                 q.push_back(msg);
                 peer.signal.notify_one();
@@ -237,7 +239,7 @@ mod tests {
         let pipe = MessagePipe::new("a", "b");
         pipe.endpoint0.send(Message::new("hello")).unwrap();
         let msg = pipe.endpoint1.receive().unwrap();
-        assert_eq!(msg.name, "hello");
+        assert_eq!(msg.name.as_str(), "hello");
     }
 
     #[test]
@@ -261,7 +263,7 @@ mod tests {
         pipe.endpoint0.send(Message::new("to_right")).unwrap();
         pipe.endpoint1.send(Message::new("to_left")).unwrap();
 
-        assert_eq!(pipe.endpoint1.receive().unwrap().name, "to_right");
-        assert_eq!(pipe.endpoint0.receive().unwrap().name, "to_left");
+        assert_eq!(pipe.endpoint1.receive().unwrap().name.as_str(), "to_right");
+        assert_eq!(pipe.endpoint0.receive().unwrap().name.as_str(), "to_left");
     }
 }

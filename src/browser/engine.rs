@@ -5,7 +5,9 @@
 #[cfg(any(feature = "boa", feature = "v8"))]
 use crate::js_engine::JsEngine;
 use crate::{renderer::Renderer, DomWrapper, NetworkClient};
-use log::{debug, error, info, warn};
+#[cfg(any(feature = "boa", feature = "v8"))]
+use log::error;
+use log::{debug, info, warn};
 use std::path::Path;
 use thiserror::Error;
 
@@ -68,6 +70,7 @@ pub struct BrowserEngine {
     height: u32,
     title: Option<String>,
     current_url: Option<String>,
+    current_favicon: Option<String>,
     network_client: NetworkClient,
     #[cfg(any(feature = "boa", feature = "v8"))]
     js_engine: JsEngine,
@@ -87,6 +90,7 @@ impl BrowserEngine {
             height,
             title: None,
             current_url: None,
+            current_favicon: None,
             network_client,
             #[cfg(any(feature = "boa", feature = "v8"))]
             js_engine: JsEngine::new(),
@@ -106,8 +110,11 @@ impl BrowserEngine {
 
         let doc = Document::from_html(&html, &final_url);
         self.document = Some(doc);
-        self.current_url = Some(final_url);
+        self.current_url = Some(final_url.clone());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
+        if let Some(ref dom) = self.document {
+            self.current_favicon = self.extract_favicon(dom.get_dom());
+        }
 
         #[cfg(any(feature = "boa", feature = "v8"))]
         self.run_page_scripts(url, &html);
@@ -131,8 +138,11 @@ impl BrowserEngine {
 
         let doc = Document::from_html(&html, &final_url);
         self.document = Some(doc);
-        self.current_url = Some(final_url);
+        self.current_url = Some(final_url.clone());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
+        if let Some(ref dom) = self.document {
+            self.current_favicon = self.extract_favicon(dom.get_dom());
+        }
 
         #[cfg(any(feature = "boa", feature = "v8"))]
         self.run_page_scripts(url, &html);
@@ -148,6 +158,9 @@ impl BrowserEngine {
         self.document = Some(doc);
         self.current_url = Some(url.to_string());
         self.title = self.document.as_ref().and_then(|d| d.title.clone());
+        if let Some(ref dom) = self.document {
+            self.current_favicon = self.extract_favicon(dom.get_dom());
+        }
 
         #[cfg(any(feature = "boa", feature = "v8"))]
         self.run_page_scripts(url, html);
@@ -164,6 +177,9 @@ impl BrowserEngine {
                 self.document = Some(doc);
                 self.current_url = Some(path.to_string());
                 self.title = self.document.as_ref().and_then(|d| d.title.clone());
+                if let Some(ref dom) = self.document {
+                    self.current_favicon = self.extract_favicon(dom.get_dom());
+                }
 
                 #[cfg(any(feature = "boa", feature = "v8"))]
                 self.run_page_scripts(path, &html);
@@ -256,6 +272,10 @@ impl BrowserEngine {
         self.title.as_deref()
     }
 
+    pub fn favicon(&self) -> Option<&str> {
+        self.current_favicon.as_deref()
+    }
+
     pub fn url(&self) -> &str {
         self.current_url.as_deref().unwrap_or("about:blank")
     }
@@ -269,6 +289,41 @@ impl BrowserEngine {
         self.width = width;
         self.height = height;
         self.renderer.set_viewport(width, height);
+    }
+
+    /// 从 DOM 中提取 favicon URL
+    fn extract_favicon(&self, dom: &DomWrapper) -> Option<String> {
+        // 1. 检查 <link rel="icon" href="...">
+        if let Some(node) = dom.select_first("link[rel=icon], link[rel='shortcut icon']") {
+            if let Some(href) = dom.attribute(node, "href") {
+                return Some(self.resolve_url(&href));
+            }
+        }
+        // 2. 检查 <link rel="apple-touch-icon">
+        if let Some(node) = dom.select_first("link[rel=apple-touch-icon]") {
+            if let Some(href) = dom.attribute(node, "href") {
+                return Some(self.resolve_url(&href));
+            }
+        }
+        None
+    }
+
+    /// 将相对 URL 解析为绝对 URL
+    fn resolve_url(&self, url: &str) -> String {
+        if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") {
+            url.to_string()
+        } else if url.starts_with("//") {
+            format!("https:{}", url)
+        } else {
+            // 基于当前页面 URL 解析
+            let base = self.current_url.as_deref().unwrap_or("about:blank");
+            if let Ok(base_url) = url::Url::parse(base) {
+                if let Ok(resolved) = base_url.join(url) {
+                    return resolved.to_string();
+                }
+            }
+            url.to_string()
+        }
     }
 
     pub fn dom(&self) -> Option<&Document> {

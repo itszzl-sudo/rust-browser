@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use log::trace;
+
 use crate::bridge::{
     Color, EventHandler, FormHandler, LayoutNode, LayoutRect, WebNativeBridge, WindowOpenHandler,
 };
@@ -14,6 +16,8 @@ use crate::dom_wrapper::DomWrapper;
 use crate::renderer::taffy_layout::{TaffyLayoutEngine, TaffyLayoutNode};
 use crate::renderer::Renderer;
 
+#[cfg(any(feature = "v8", feature = "boa"))]
+use crate::js_dom_bridge::JsDomBridge;
 #[cfg(any(feature = "v8", feature = "boa"))]
 use crate::js_engine::JsEngine;
 
@@ -47,6 +51,10 @@ pub struct DefaultWebNativeBridge {
 
     /// 网络客户端
     network_client: crate::network::NetworkClient,
+
+    /// JS DOM 桥接器（跟踪 JS 发起的 DOM 变更）
+    #[cfg(any(feature = "v8", feature = "boa"))]
+    js_dom_bridge: JsDomBridge,
 
     #[cfg(any(feature = "v8", feature = "boa"))]
     js_engine: JsEngine,
@@ -94,6 +102,8 @@ impl WebNativeBridge for DefaultWebNativeBridge {
             form_handlers: HashMap::new(),
             window_open_handler: None,
             #[cfg(any(feature = "v8", feature = "boa"))]
+            js_dom_bridge: JsDomBridge::new(),
+            #[cfg(any(feature = "v8", feature = "boa"))]
             js_engine: JsEngine::new(),
         }
     }
@@ -106,8 +116,20 @@ impl WebNativeBridge for DefaultWebNativeBridge {
 
         #[cfg(any(feature = "v8", feature = "boa"))]
         {
+            // 创建新的 JsDomBridge 并关联到渲染器
+            self.js_dom_bridge = JsDomBridge::new();
+            self.renderer.set_js_dom_bridge(JsDomBridge::new());
+            self.renderer.set_js_engine(JsEngine::new());
+
             let _ = self.js_engine.initialize(&self.url);
             self.js_engine.set_url(&self.url);
+
+            // 同步 renderer 的 JS 引擎引用
+            if let Some(engine) = self.renderer.js_engine_mut() {
+                let _ = engine.initialize(&self.url);
+                engine.set_url(&self.url);
+            }
+
             let _ = self.js_engine.evaluate("document.body.innerHTML = ''");
         }
     }
@@ -233,7 +255,13 @@ impl WebNativeBridge for DefaultWebNativeBridge {
             self.inline_styles.clear();
         }
 
-        // 2. 提取 CSS 并计算布局
+        // 2. 检查 JS DOM 桥接器是否有待处理的 DOM 变更
+        #[cfg(any(feature = "boa", feature = "v8"))]
+        let dom_was_modified = self.js_dom_bridge.has_pending();
+        #[cfg(not(any(feature = "boa", feature = "v8")))]
+        let dom_was_modified = false;
+
+        // 3. 提取 CSS 并计算布局
         let doc_ref = self.dom.inner_document();
         let all_css = {
             let style_text = crate::renderer::extract_style_tags(&self.dom);
@@ -243,11 +271,25 @@ impl WebNativeBridge for DefaultWebNativeBridge {
         let rules = crate::css_engine::parse_css_rules(&all_css);
         let style_map = crate::css_engine::rules_to_style_map(&rules, doc_ref);
 
+        // 如果 DOM 被 JS 修改了，需要重新计算布局以反映最新状态
+        if dom_was_modified {
+            trace!("DOM 已被 JS 修改，重建布局");
+            // 从 JsDomBridge 获取最新 DOM
+            #[cfg(any(feature = "boa", feature = "v8"))]
+            {
+                // 将 JsDomBridge 的 DOM 同步到 bridge 的 dom 字段
+                // JsDomBridge 对 dom 的修改已经直接反映在 DomWrapper 上
+                // 所以这里只需清空变更标记，下一行会重新计算布局
+                self.js_dom_bridge.drain_dirty_nodes();
+                self.js_dom_bridge.clear_mutations();
+            }
+        }
+
         self.layout = TaffyLayoutEngine::new(self.width as f32, self.height as f32);
         self.layout.set_style_map(style_map);
         let _ = self.layout.compute(&self.dom);
 
-        // 3. 渲染
+        // 4. 渲染（render_with_taffy 内部也会检查 renderer 中的 js_dom_bridge）
         self.renderer
             .render_with_taffy(&self.dom, &self.layout)
             .unwrap_or_default()

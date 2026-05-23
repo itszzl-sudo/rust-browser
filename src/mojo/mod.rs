@@ -39,12 +39,13 @@
 //!
 //! // 4. Receive it on the other end
 //! let msg = binding.wait_for_message().unwrap();
-//! assert_eq!(msg.name, "Ping");
+//! assert_eq!(msg.name.as_str(), "Ping");
 //! ```
 
 pub mod interface;
 pub mod message;
 pub mod pipe;
+pub mod process_ipc;
 
 // Re-exports for convenience
 pub use interface::{

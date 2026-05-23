@@ -11,6 +11,9 @@ use std::collections::HashMap;
 /// 默认视口宽度（用于 @media 查询评估）
 pub(crate) const VIEWPORT_WIDTH: f32 = 1280.0;
 
+/// 默认视口高度（用于 @media 查询评估）
+pub(crate) const VIEWPORT_HEIGHT: f32 = 720.0;
+
 /// 单个 CSS 声明
 #[derive(Debug, Clone)]
 pub struct Declaration {
@@ -219,7 +222,50 @@ fn evaluate_parenthesized_condition(cond: &str) -> bool {
         }
     }
 
-    // 其他条件暂不支持，默认返回 true 以兼容
+    // min-height: Xpx
+    if let Some(value_str) = inner.strip_prefix("min-height:") {
+        let value_str = value_str.trim();
+        if let Some(px_value) = parse_length(value_str) {
+            return px_value <= VIEWPORT_HEIGHT;
+        }
+    }
+
+    // max-height: Xpx
+    if let Some(value_str) = inner.strip_prefix("max-height:") {
+        let value_str = value_str.trim();
+        if let Some(px_value) = parse_length(value_str) {
+            return px_value >= VIEWPORT_HEIGHT;
+        }
+    }
+
+    // prefers-color-scheme: dark
+    if inner
+        .trim()
+        .eq_ignore_ascii_case("prefers-color-scheme: dark")
+    {
+        // 当前默认支持暗色模式
+        return true;
+    }
+
+    // prefers-color-scheme: light
+    if inner
+        .trim()
+        .eq_ignore_ascii_case("prefers-color-scheme: light")
+    {
+        // 当前默认暗色，不支持 light
+        return false;
+    }
+
+    // prefers-reduced-motion: reduce
+    if inner
+        .trim()
+        .eq_ignore_ascii_case("prefers-reduced-motion: reduce")
+    {
+        // 当前不支持减少动画
+        return false;
+    }
+
+    // 其他条件，默认返回 true 以兼容
     true
 }
 

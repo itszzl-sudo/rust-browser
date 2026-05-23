@@ -101,6 +101,18 @@ pub struct TaffyLayoutNode {
     pub overflow_x: String,
     /// CSS overflow-y（hidden/visible/auto/scroll）
     pub overflow_y: String,
+    /// CSS z-index（层叠顺序，默认 0）
+    pub z_index: i32,
+    /// CSS font-style（normal / italic / oblique）
+    pub font_style: String,
+    /// CSS opacity（0.0 ~ 1.0，默认 1.0）
+    pub opacity: f32,
+    /// CSS transform（原始值，如 "translate(10px, 20px)"）
+    pub transform: Option<String>,
+    /// transform 解析出的 X 偏移（px）
+    pub transform_dx: f32,
+    /// transform 解析出的 Y 偏移（px）
+    pub transform_dy: f32,
 }
 
 /// 完整的 taffy 布局引擎（完整版）
@@ -198,6 +210,9 @@ impl TaffyLayoutEngine {
         // 4. 计算布局
         self.compute_layout()?;
 
+        // 5. 对 float 元素做后处理偏移
+        self.apply_float_layout();
+
         info!(
             "布局计算完成！共 {} 个节点 (taffy: {})",
             self.layout_nodes.len(),
@@ -277,7 +292,16 @@ impl TaffyLayoutEngine {
                     }
                 }
                 "em" | "i" => {
-                    // cosmic-text font-style 暂不支持 italic，留待后续
+                    // TODO: cosmic-text 渲染时 font-style 暂不支持斜体变体。
+                    // 当前 CSS 解析层会正确识别 font-style: italic 声明并存储，
+                    // 但渲染层尚未实现斜体字形选择。后续可通过 Attrs::style() 设置。
+                    // 这里通过 CSS 声明注入属性，供 determine_style 中的 font-style 解析使用。
+                    if get_declaration(&merged_decls, "font-style").is_none() {
+                        merged_decls.push(Declaration {
+                            property: "font-style".into(),
+                            value: "italic".into(),
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -345,6 +369,12 @@ impl TaffyLayoutEngine {
                 text_decoration: self.determine_text_decoration(&merged_decls),
                 overflow_x: self.determine_overflow(&merged_decls, "overflow-x"),
                 overflow_y: self.determine_overflow(&merged_decls, "overflow-y"),
+                font_style: self.determine_font_style(&merged_decls),
+                z_index: Self::determine_z_index(&merged_decls),
+                opacity: TaffyLayoutEngine::determine_opacity(&merged_decls),
+                transform: Self::determine_transform(&merged_decls),
+                transform_dx: 0.0,
+                transform_dy: 0.0,
             };
 
             let layout_idx = self.layout_nodes.len();
@@ -463,11 +493,46 @@ impl TaffyLayoutEngine {
         // 默认显示方式
         match tag_lower.as_str() {
             "div" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "section" | "article"
-            | "header" | "footer" | "nav" | "aside" | "main" | "ul" | "ol" | "li" | "form"
-            | "table" | "tr" => {
+            | "header" | "footer" | "nav" | "aside" | "main" | "ul" | "ol" | "li" | "form" => {
                 style.display = Display::Block;
-                // 不设置 flex_direction，保留 taffy 默认（Row），
-                // 这样 display:flex 的子元素默认水平排列
+            }
+            // 表格相关标签：使用 Grid 布局模拟表格
+            "table" => {
+                style.display = Display::Grid;
+                style.grid_template_columns = vec![auto()]; // 默认单列，子元素（tr）按行排列
+            }
+            "tr" => {
+                style.display = Display::Grid;
+                // 行内单元格默认水平均分
+                style.grid_template_columns = vec![fr(1.0)];
+            }
+            "td" | "th" => {
+                style.display = Display::Grid;
+                style.size = Size {
+                    width: length(100.0),
+                    height: length(30.0),
+                };
+            }
+            "thead" | "tbody" | "tfoot" => {
+                style.display = Display::Grid;
+                style.grid_template_columns = vec![auto()];
+            }
+            "caption" => {
+                style.display = Display::Block;
+            }
+            "select" => {
+                style.display = Display::Block;
+                style.size = Size {
+                    width: length(200.0),
+                    height: length(30.0),
+                };
+            }
+            "option" => {
+                style.display = Display::Block;
+                style.size = Size {
+                    width: percent(1.0),
+                    height: length(22.0),
+                };
             }
             "span" | "a" | "em" | "strong" | "b" | "i" | "code" => {
                 style.display = Display::Block;
@@ -924,7 +989,9 @@ impl TaffyLayoutEngine {
 
         // 解析 white-space
         if let Some(v) = get_declaration(decls, "white-space") {
-            // nowrap 暂不处理（taffy 0.10 中无对应类型）
+            // KNOWN LIMITATION: nowrap 暂不处理 — taffy 0.10 的 Style 没有 white_space 字段，
+            // 且 taffy 不支持通过 API 设置 nowrap 行为。后续升级 taffy 版本后可启用。
+            // 目前所有文本都会自动换行。
             let _ = v;
         }
 
@@ -952,11 +1019,12 @@ impl TaffyLayoutEngine {
         // 解析 order（taffy 0.10 中 Style 没有 order 字段，已忽略）
         let _ = get_declaration(decls, "order");
 
-        // 解析 position
+        // 解析 position（taffy 0.10 只有 Relative / Absolute 两种）
+        // fixed 和 sticky 降级为 absolute（语义接近：脱离文档流）
         if let Some(pos) = get_declaration(decls, "position") {
             match pos.as_str() {
                 "relative" => style.position = taffy::Position::Relative,
-                "absolute" => style.position = taffy::Position::Absolute,
+                "absolute" | "fixed" | "sticky" => style.position = taffy::Position::Absolute,
                 _ => {}
             }
         }
@@ -1372,6 +1440,169 @@ impl TaffyLayoutEngine {
         FloatType::None
     }
 
+    /// 确定 font-style（normal / italic / oblique）
+    fn determine_font_style(&self, decls: &[Declaration]) -> String {
+        if let Some(fs) = get_declaration(decls, "font-style") {
+            let trimmed = fs.trim().to_lowercase();
+            match trimmed.as_str() {
+                "italic" | "oblique" | "normal" => return trimmed,
+                _ => {}
+            }
+        }
+        "normal".to_string()
+    }
+
+    /// 解析 CSS z-index 值
+    fn determine_z_index(decls: &[Declaration]) -> i32 {
+        if let Some(z) = get_declaration(decls, "z-index") {
+            if let Ok(val) = z.trim().parse::<i32>() {
+                return val;
+            }
+        }
+        0
+    }
+
+    /// 解析 CSS opacity 值（0.0 ~ 1.0，默认 1.0）
+    fn determine_opacity(decls: &[Declaration]) -> f32 {
+        if let Some(o) = get_declaration(decls, "opacity") {
+            if let Ok(val) = o.trim().parse::<f32>() {
+                return val.clamp(0.0, 1.0);
+            }
+        }
+        1.0
+    }
+
+    /// 解析 CSS transform 值 — 支持 translate(tx, ty)、translateX(tx)、translateY(ty)
+    fn determine_transform(decls: &[Declaration]) -> Option<String> {
+        let transform = get_declaration(decls, "transform")?;
+        Some(transform.clone())
+    }
+
+    /// 解析 CSS translate 偏移值，返回 (dx, dy) px
+    pub fn parse_transform_offset(transform: &str) -> (f32, f32) {
+        let t = transform.trim();
+        // translate(10px, 20px)
+        if let Some(inner) = t.strip_prefix("translate(") {
+            if let Some(end) = inner.find(')') {
+                let args = &inner[..end];
+                let parts: Vec<&str> = args.split(',').collect();
+                let dx = parts
+                    .first()
+                    .map(|s| Self::parse_length_px(s.trim()))
+                    .unwrap_or(0.0);
+                let dy = parts
+                    .get(1)
+                    .map(|s| Self::parse_length_px(s.trim()))
+                    .unwrap_or(0.0);
+                return (dx, dy);
+            }
+        }
+        // translateX(10px)
+        if let Some(inner) = t.strip_prefix("translateX(") {
+            if let Some(end) = inner.find(')') {
+                let dx = Self::parse_length_px(inner[..end].trim());
+                return (dx, 0.0);
+            }
+        }
+        // translateY(10px)
+        if let Some(inner) = t.strip_prefix("translateY(") {
+            if let Some(end) = inner.find(')') {
+                let dy = Self::parse_length_px(inner[..end].trim());
+                return (0.0, dy);
+            }
+        }
+        (0.0, 0.0)
+    }
+
+    /// 解析 CSS 长度值（支持 px 和无单位数字），返回像素值
+    fn parse_length_px(val: &str) -> f32 {
+        let v = val.trim();
+        if let Some(px) = v.strip_suffix("px") {
+            px.trim().parse::<f32>().unwrap_or(0.0)
+        } else {
+            v.parse::<f32>().unwrap_or(0.0)
+        }
+    }
+
+    /// 在 taffy 基础布局完成后，调整 float 元素的位置
+    ///
+    /// 策略：
+    /// 1. 找到所有 float: left / right 的节点
+    /// 2. 按文档顺序收集 float 节点
+    /// 3. 对 float: left 节点，从其父容器左边缘开始排列
+    /// 4. 对 float: right 节点，从其父容器右边缘开始排列
+    /// 5. 如果剩余空间不够，换行（暂时使用简单排列，不处理换行）
+    fn apply_float_layout(&mut self) {
+        // 收集所有 float 节点
+        // (layout_idx, float_type, width)
+        let float_nodes: Vec<(usize, FloatType, f32)> = self
+            .layout_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.float_type != FloatType::None)
+            .map(|(idx, node)| (idx, node.float_type, node.width))
+            .collect();
+
+        if float_nodes.is_empty() {
+            return;
+        }
+
+        // 按父节点分组
+        let mut parent_groups: std::collections::HashMap<usize, Vec<(usize, FloatType, f32)>> =
+            std::collections::HashMap::new();
+        for &(idx, float_type, width) in &float_nodes {
+            if let Some(layout_node) = self.layout_nodes.get(idx) {
+                let node = layout_node.node;
+                // 找到 taffy 父节点
+                if let Some(parent_taffy_node) = self.taffy.parent(node) {
+                    // 通过 taffy 节点 ID 找到布局索引
+                    if let Some(parent_layout_idx) = self
+                        .layout_nodes
+                        .iter()
+                        .position(|n| n.node == parent_taffy_node)
+                    {
+                        parent_groups
+                            .entry(parent_layout_idx)
+                            .or_default()
+                            .push((idx, float_type, width));
+                    }
+                }
+            }
+        }
+
+        // 对每个父节点内的 float 子节点进行排列
+        for (&parent_idx, child_indices) in &parent_groups {
+            // 获取父容器宽度
+            let parent_width = if let Some(parent_node) = self.layout_nodes.get(parent_idx) {
+                parent_node.width.max(1.0)
+            } else {
+                self.viewport.width.into_option().unwrap_or(800.0)
+            };
+
+            let mut left_x = 0.0f32;
+            let mut right_x = 0.0f32;
+
+            for &(child_idx, float_type, child_width) in child_indices {
+                if child_width <= 0.0 {
+                    continue;
+                }
+                if let Some(node) = self.layout_nodes.get_mut(child_idx) {
+                    match float_type {
+                        FloatType::Left => {
+                            node.x = left_x;
+                            left_x += child_width + 8.0; // 8px 间距
+                        }
+                        FloatType::Right => {
+                            node.x = parent_width - child_width - right_x;
+                            right_x += child_width + 8.0;
+                        }
+                        FloatType::None => {}
+                    }
+                }
+            }
+        }
+    }
+
     /// 计算布局
     fn compute_layout(&mut self) -> Result<(), String> {
         if let Some(root) = self.root {
@@ -1406,6 +1637,13 @@ impl TaffyLayoutEngine {
                 layout_node.y = abs_y;
                 layout_node.width = layout.size.width;
                 layout_node.height = layout.size.height;
+
+                // 解析 transform 偏移
+                if let Some(ref tf) = layout_node.transform {
+                    let (dx, dy) = TaffyLayoutEngine::parse_transform_offset(tf);
+                    layout_node.transform_dx = dx;
+                    layout_node.transform_dy = dy;
+                }
             }
         }
 
@@ -1516,6 +1754,30 @@ impl TaffyLayoutEngine {
             }
         }
         None
+    }
+
+    /// 返回视口宽度
+    pub fn get_viewport_width(&self) -> f32 {
+        match self.viewport.width {
+            AvailableSpace::Definite(w) => w,
+            _ => 1280.0,
+        }
+    }
+
+    /// 返回视口高度
+    pub fn get_viewport_height(&self) -> f32 {
+        match self.viewport.height {
+            AvailableSpace::Definite(h) => h,
+            _ => 720.0,
+        }
+    }
+
+    /// 计算文档总高度（所有布局节点中最大的底部位置）
+    pub fn document_height(&self) -> f32 {
+        self.layout_nodes
+            .iter()
+            .map(|n| n.y + n.height)
+            .fold(0.0f32, f32::max)
     }
 }
 

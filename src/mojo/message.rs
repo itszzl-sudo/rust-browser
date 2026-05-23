@@ -26,9 +26,37 @@ pub struct Handle {
 /// - A method name (or interface method ID) identifying the operation.
 /// - A serialized payload (the message body).
 /// - A list of transferred handles (e.g., pipe endpoints).
+/// 消息名称类型 — 既支持静态字符串也支持动态字符串
+#[derive(Debug, Clone)]
+pub enum MessageName {
+    Static(&'static str),
+    Owned(String),
+}
+
+impl MessageName {
+    pub fn as_str(&self) -> &str {
+        match self {
+            MessageName::Static(s) => s,
+            MessageName::Owned(s) => s.as_str(),
+        }
+    }
+}
+
+impl From<&'static str> for MessageName {
+    fn from(s: &'static str) -> Self {
+        MessageName::Static(s)
+    }
+}
+
+impl From<String> for MessageName {
+    fn from(s: String) -> Self {
+        MessageName::Owned(s)
+    }
+}
+
 pub struct Message {
     /// Interface method name/ID.
-    pub name: &'static str,
+    pub name: MessageName,
     /// Serialized payload.
     pub data: Vec<u8>,
     /// Transferred handles (pipe endpoints, etc.).
@@ -39,7 +67,16 @@ impl Message {
     /// Create a new message with the given method name.
     pub fn new(name: &'static str) -> Self {
         Self {
-            name,
+            name: MessageName::Static(name),
+            data: Vec::new(),
+            handles: Vec::new(),
+        }
+    }
+
+    /// Create a new message with an owned (dynamic) name.
+    pub fn new_with_owned_name(name: String) -> Self {
+        Self {
+            name: MessageName::Owned(name),
             data: Vec::new(),
             handles: Vec::new(),
         }
@@ -68,7 +105,8 @@ pub trait MessageSerializable: Send {
     fn serialize(&self) -> Vec<u8>;
     /// Deserialize a value from a byte slice.
     fn deserialize(data: &[u8]) -> Self
-    where Self: Sized;
+    where
+        Self: Sized;
 }
 
 // --- Built-in serialization implementations ---

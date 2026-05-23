@@ -100,21 +100,21 @@ impl TabManager {
     pub fn new_tab(&mut self) -> &mut Tab {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        
+
         // 取消所有标签页的活跃状态
         for tab in &mut self.tabs {
             tab.is_active = false;
         }
-        
+
         let mut tab = Tab::new(id);
         tab.is_active = true;
-        
+
         self.histories.insert(id, Vec::new());
         self.history_positions.insert(id, 0);
-        
+
         self.tabs.push(tab);
         self.active_index = self.tabs.len() - 1;
-        
+
         debug!("创建新标签页: {}", id);
         self.tabs.last_mut().unwrap()
     }
@@ -122,24 +122,26 @@ impl TabManager {
     /// 关闭标签页
     pub fn close_tab(&mut self, index: usize) -> Result<(), BrowserError> {
         if self.tabs.len() <= 1 {
-            return Err(BrowserError::NavigationError("无法关闭最后一个标签页".to_string()));
+            return Err(BrowserError::NavigationError(
+                "无法关闭最后一个标签页".to_string(),
+            ));
         }
-        
+
         let tab_id = self.tabs[index].id;
         self.tabs.remove(index);
         self.histories.remove(&tab_id);
         self.history_positions.remove(&tab_id);
-        
+
         // 调整活跃索引
         if self.active_index >= self.tabs.len() {
             self.active_index = self.tabs.len() - 1;
         }
-        
+
         // 更新活跃状态
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             tab.is_active = i == self.active_index;
         }
-        
+
         debug!("关闭标签页，剩余: {}", self.tabs.len());
         Ok(())
     }
@@ -155,20 +157,27 @@ impl TabManager {
         }
     }
 
+    /// 设置活跃标签页的 favicon
+    pub fn set_active_tab_favicon(&mut self, favicon: Option<String>) {
+        if let Some(tab) = self.tabs.get_mut(self.active_index) {
+            tab.favicon = favicon;
+        }
+    }
+
     /// 更新活跃标签页信息
     pub fn update_active_tab(&mut self, url: &str, title: Option<String>) {
         if let Some(tab) = self.tabs.get_mut(self.active_index) {
             tab.url = url.to_string();
             tab.title = title.clone();
-            
+
             // 添加到历史记录
             let entry = HistoryEntry {
                 url: url.to_string(),
                 title: title.clone(),
             };
-            
+
             let pos = self.history_positions.entry(tab.id).or_insert(0);
-            
+
             // 如果当前位置不是历史记录的末尾，清除后面的记录
             if let Some(history) = self.histories.get_mut(&tab.id) {
                 let pos_usize = *pos;

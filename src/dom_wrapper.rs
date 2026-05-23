@@ -162,6 +162,12 @@ impl DomWrapper {
     }
 
     /// 设置元素属性
+    /// Rebuild node index from scratch (call after any DOM tree mutation)
+    pub fn rebuild_node_index(&mut self) {
+        self.build_node_index();
+    }
+
+    /// Set element attribute
     pub fn set_attribute(&self, index: usize, name: &str, value: &str) {
         if let Some(node) = self.get_node(index) {
             if let Some(element) = node.as_element() {
@@ -313,6 +319,14 @@ impl DomWrapper {
             .copied()
     }
 
+    /// 通过 NodeRef 获取标签名
+    pub fn tag_name_of_node(&self, node: &NodeRef) -> Option<String> {
+        if let Some(element) = node.as_element() {
+            return Some(element.name.local.to_string());
+        }
+        None
+    }
+
     /// 通过 NodeRef 获取 64 位稳定 ID
     pub fn node_id_of_node(&self, node_ref: &NodeRef) -> Option<u64> {
         let rc_ptr = Rc::as_ptr(&node_ref.0) as usize;
@@ -443,13 +457,7 @@ mod tests {
         let html = "<html><body><p>hello</p></body></html>";
         let dom = DomWrapper::from_html(html, None);
         let elements = dom.traverse_elements();
-        eprintln!("text_content elements: {:?}", elements);
         let p_idx = assert_tag(&elements, "p");
-        eprintln!(
-            "p_idx = {:?}, text_content = {:?}",
-            p_idx,
-            dom.text_content(p_idx)
-        );
         let text = dom.text_content(p_idx);
         assert_eq!(text, Some("hello".to_string()));
     }

@@ -22,6 +22,7 @@ use std::thread;
 use std::time::Duration;
 
 /// A single worker thread together with its local deque.
+#[allow(dead_code)]
 struct WorkerThread {
     /// Index in the pool (0 .. num_workers-1).
     id: usize,

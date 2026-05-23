@@ -42,8 +42,13 @@ impl TextRenderer {
 
     /// 测量文本尺寸（快速估计，所有字符等宽）
     ///
+    /// 此方法为简化实现，精度较低。
     /// 对于需要高精度的场景（如 CJK 字符、可变宽度字体），
-    /// 请使用 [`Self::measure_text_accurate`] 方法替代。
+    /// 请使用 [`Self::measure_text_exact`] 方法替代。
+    #[deprecated(
+        since = "0.1.0",
+        note = "请改用 measure_text_exact，它使用 cosmic-text 精确测量"
+    )]
     pub fn measure_text(&self, text: &str) -> (f32, f32) {
         // 简化实现：按字符估计宽度
         let char_width = self.default_font_size * 0.6;
@@ -51,6 +56,30 @@ impl TextRenderer {
         let height = self.default_font_size * self.line_height;
 
         (width, height)
+    }
+
+    /// 使用 cosmic-text 精确测量文本尺寸（推荐使用）。
+    ///
+    /// 支持可变宽度字体、CJK 字符、emoji 等复杂字形，
+    /// 返回准确的 (宽度, 高度)。
+    ///
+    /// # 参数
+    /// - `text`: 要测量的文本
+    /// - `font_system`: cosmic-text 字体系统
+    /// - `max_width`: 最大可用宽度（用于自动换行）
+    pub fn measure_text_exact(
+        &self,
+        text: &str,
+        font_system: &mut FontSystem,
+        max_width: f32,
+    ) -> (f32, f32) {
+        measure_text_cosmic(
+            text,
+            font_system,
+            max_width,
+            self.default_font_size,
+            self.line_height,
+        )
     }
 
     /// 使用 cosmic-text 精确测量文本尺寸。
@@ -76,6 +105,7 @@ impl TextRenderer {
     }
 
     /// 测量多行文本
+    #[allow(deprecated)]
     pub fn measure_multiline(&self, text: &str, max_width: f32) -> Vec<(String, (f32, f32))> {
         let char_width = self.default_font_size * 0.6;
         let chars_per_line = (max_width / char_width).floor() as usize;
@@ -294,6 +324,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn test_text_renderer_creation() {
         let renderer = TextRenderer::new();
         let (width, height) = renderer.measure_text("Hello");
@@ -302,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_text_measurement() {
         let renderer = TextRenderer::new();
         let text = "Hello, World!";

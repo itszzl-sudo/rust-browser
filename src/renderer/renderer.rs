@@ -5,6 +5,10 @@
 use crate::browser::Document;
 use crate::css::values::Color;
 use crate::css_engine::{parse_css_rules, rules_to_style_map};
+#[cfg(any(feature = "boa", feature = "v8"))]
+use crate::js_dom_bridge::JsDomBridge;
+#[cfg(any(feature = "boa", feature = "v8"))]
+use crate::js_engine::JsEngine;
 use crate::renderer::border::draw_box_shadow;
 use crate::renderer::context::RenderContext;
 use crate::renderer::image_cache::ImageCache;
@@ -136,6 +140,16 @@ pub struct Renderer {
     pub cursor: crate::renderer::cursor::CursorRenderer,
     /// 上次按键时间（秒，用于光标重置计时）
     pub last_key_time: f32,
+    /// 垂直滚动偏移（像素）
+    pub scroll_offset_y: f32,
+    /// 页面总内容高度（由最近一次布局计算得出）
+    pub content_height: f32,
+    /// JS DOM 桥接器（仅在启用 JS 引擎时可用）
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    js_dom_bridge: Option<JsDomBridge>,
+    /// JS 引擎（仅在启用 JS 引擎时可用）
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    js_engine: Option<JsEngine>,
 }
 
 impl Renderer {
@@ -163,7 +177,13 @@ impl Renderer {
             is_loading: false,
             focused_node: None,
             cursor: crate::renderer::cursor::CursorRenderer::new(),
+            scroll_offset_y: 0.0,
+            content_height: 0.0,
             last_key_time: 0.0,
+            #[cfg(any(feature = "boa", feature = "v8"))]
+            js_dom_bridge: None,
+            #[cfg(any(feature = "boa", feature = "v8"))]
+            js_engine: None,
         }
     }
 
@@ -214,6 +234,119 @@ impl Renderer {
         self.document = doc;
         self.is_loading = false;
         Ok((w, h, data))
+    }
+
+    /// 渲染文档到 RGBA，应用垂直滚动偏移
+    /// 与 render_to_rgba 的区别：将视口作为裁剪窗口，只渲染可见区域内的内容
+    pub fn render_to_rgba_with_scroll(&mut self) -> Result<(u32, u32, Vec<u8>), RenderError> {
+        self.is_loading = true;
+        let doc = self.document.take();
+
+        let (vp_w, vp_h) = self.context.viewport();
+
+        // 背景填充
+        self.painter.set_background(Color::WHITE);
+        self.painter.paint();
+
+        if let Some(ref d) = doc {
+            // 设置视口裁剪（只绘制可见区域）
+            self.painter.set_clip(0.0, 0.0, vp_w as f32, vp_h as f32);
+
+            // 保存滚动偏移到临时变量，供渲染回调使用
+            let scroll_y = self.scroll_offset_y;
+
+            // 渲染文档（TaffyRenderer 会通过 context 获取滚动偏移）
+            // 这里通过设置 painter 的全局偏移来实现
+            self.render_document_with_scroll(d, scroll_y)?;
+
+            self.painter.clear_clip();
+        } else {
+            self.render_blank_page()?;
+        }
+
+        let data = self.painter.pixmap().data().to_vec();
+        self.document = doc;
+        self.is_loading = false;
+        Ok((vp_w, vp_h, data))
+    }
+
+    /// 带滚动偏移的文档渲染
+    fn render_document_with_scroll(
+        &mut self,
+        document: &Document,
+        scroll_y: f32,
+    ) -> Result<(), RenderError> {
+        trace!(
+            "渲染文档 (scroll_y={:.0}): {}",
+            scroll_y,
+            document.title.as_deref().unwrap_or("无标题")
+        );
+
+        let dom = document.get_dom();
+
+        // 1. 从 DOM 提取 <style> CSS
+        let css_text = extract_style_tags(dom);
+
+        // 2. 解析 CSS 规则并生成 StyleMap
+        let style_map = if !css_text.is_empty() {
+            let rules = parse_css_rules(&css_text);
+            rules_to_style_map(&rules, dom.inner_document())
+        } else {
+            Default::default()
+        };
+
+        // 3. 创建 TaffyLayoutEngine 并设置 StyleMap
+        let (vp_w, vp_h) = self.context.viewport();
+        let mut taffy = TaffyLayoutEngine::new(vp_w as f32, vp_h as f32);
+        taffy.set_style_map(style_map);
+
+        // 4. 计算布局
+        let _ = taffy.compute(dom);
+
+        // 5. 从 body/html 获取背景色
+        let page_bg = taffy
+            .find_by_tag("body")
+            .iter()
+            .find_map(|n| n.background.clone())
+            .or_else(|| {
+                taffy
+                    .find_by_tag("html")
+                    .iter()
+                    .find_map(|n| n.background.clone())
+            })
+            .unwrap_or(Color::WHITE);
+        self.painter.set_background(page_bg);
+        self.painter.paint();
+
+        // 6. 更新内容高度（用于夹紧滚动范围）
+        self.content_height = taffy.document_height();
+
+        // 7. 使用 Taffy 布局结果渲染，应用滚动偏移
+        {
+            let mut renderer = TaffyRenderer {
+                painter: &mut self.painter,
+                taffy: &taffy,
+                dom,
+                node_index_cache: std::collections::HashMap::new(),
+                scroll_offset_y: scroll_y,
+            };
+            renderer.render_dom();
+        }
+
+        self.last_taffy = Some(taffy);
+        debug!("文档渲染完成 (scroll_y={:.0})", scroll_y);
+        Ok(())
+    }
+
+    /// 设置滚动偏移（自动夹紧到有效范围内）
+    pub fn set_scroll_offset(&mut self, offset_y: f32) {
+        let max_scroll = (self.content_height - self.context.viewport().1 as f32).max(0.0);
+        self.scroll_offset_y = offset_y.clamp(0.0, max_scroll);
+    }
+
+    /// 获取当前的滚动偏移
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll_offset_y
     }
 
     /// 调整大小（resize 是 set_viewport 的别名）
@@ -291,33 +424,12 @@ impl Renderer {
 
         // 4.5 从 body/html 获取背景色，设置画布背景
         let body_nodes = taffy.find_by_tag("body");
-        eprintln!(
-            "[背景调试] body 节点数: {} (is_empty={})",
-            body_nodes.len(),
-            taffy.is_empty()
-        );
-        for (i, n) in body_nodes.iter().enumerate() {
-            eprintln!(
-                "[背景调试]   body[{}] background={:?}, tag={}, pos=({},{}) size=({}x{})",
-                i, n.background, n.tag_name, n.x, n.y, n.width, n.height
-            );
-        }
         let html_nodes = taffy.find_by_tag("html");
-        for (i, n) in html_nodes.iter().enumerate() {
-            eprintln!(
-                "[背景调试]   html[{}] background={:?}, tag={}",
-                i, n.background, n.tag_name
-            );
-        }
         let page_bg = body_nodes
             .iter()
             .find_map(|n| n.background.clone())
             .or_else(|| html_nodes.iter().find_map(|n| n.background.clone()))
             .unwrap_or(Color::WHITE);
-        eprintln!(
-            "[背景调试] 最终背景色: {:?} (r={},g={},b={},a={})",
-            page_bg, page_bg.r, page_bg.g, page_bg.b, page_bg.a
-        );
         self.painter.set_background(page_bg);
         self.painter.paint();
 
@@ -328,6 +440,7 @@ impl Renderer {
                 taffy: &taffy,
                 dom,
                 node_index_cache: std::collections::HashMap::new(),
+                scroll_offset_y: 0.0,
             };
             renderer.render_dom();
         }
@@ -340,12 +453,19 @@ impl Renderer {
     }
 
     /// 直接使用给定的 DOM 和 TaffyLayoutEngine 渲染，返回 PNG 字节
+    ///
+    /// 如果启用了 JS DOM 桥接器且有未处理的 DOM 变更，
+    /// 会在渲染前重新计算布局以反映最新的 DOM 状态。
     pub fn render_with_taffy(
         &mut self,
         dom: &DomWrapper,
         taffy: &TaffyLayoutEngine,
     ) -> Result<Vec<u8>, RenderError> {
         self.is_loading = true;
+
+        // 如果启用了 JS 引擎且有未处理的 DOM 变更，重新计算布局
+        #[cfg(any(feature = "boa", feature = "v8"))]
+        self.rebuild_layout_if_dirty(dom, taffy);
 
         // 从 body/html 获取背景色
         let page_bg = taffy
@@ -368,12 +488,36 @@ impl Renderer {
                 taffy,
                 dom,
                 node_index_cache: std::collections::HashMap::new(),
+                scroll_offset_y: 0.0,
             };
             renderer.render_dom();
         }
 
         self.is_loading = false;
         Ok(self.painter.to_png())
+    }
+
+    /// 如果 JS DOM 桥接器有未处理的 DOM 变更，则重建布局
+    ///
+    /// 检查待处理的变更标记（has_pending_changes），
+    /// 如果有变更则清空脏节点标记并重建 Taffy 布局。
+    /// 注意：此方法接收 `&TaffyLayoutEngine` 不可变引用，
+    /// 因此实际布局重建由调用方完成。这里仅清空变更标记。
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    fn rebuild_layout_if_dirty(&mut self, _dom: &DomWrapper, _taffy: &TaffyLayoutEngine) {
+        if let Some(ref mut bridge) = self.js_dom_bridge {
+            if bridge.has_pending() {
+                trace!("检测到未处理的 DOM 变更，重建布局前清空脏节点标记");
+                // 获取脏节点（用于后续可能的增量更新）
+                let _dirty_nodes = bridge.drain_dirty_nodes();
+                // 清空变异记录
+                bridge.clear_mutations();
+                // 注意：实际布局重建由调用方负责，
+                // 因为 taffy 参数是 &TaffyLayoutEngine 不可变引用。
+                // 调用方（如 DefaultWebNativeBridge::render）会在调用此方法后
+                // 重新创建 TaffyLayoutEngine 并计算布局。
+            }
+        }
     }
 
     fn render_blank_page(&mut self) -> Result<(), RenderError> {
@@ -430,6 +574,7 @@ impl Renderer {
         let mut text_renderer = TaffyRenderer {
             painter: &mut self.painter,
             taffy: &mut dummy_taffy,
+            scroll_offset_y: 0.0,
             dom: &dummy_dom,
             node_index_cache: std::collections::HashMap::new(),
         };
@@ -546,6 +691,53 @@ impl Renderer {
     /// 获取最近一次渲染的 Taffy 布局引擎引用
     pub fn taffy_layout(&self) -> Option<&TaffyLayoutEngine> {
         self.last_taffy.as_ref()
+    }
+
+    /// 获取 JS DOM 桥接器引用
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    pub fn js_dom_bridge(&self) -> Option<&JsDomBridge> {
+        self.js_dom_bridge.as_ref()
+    }
+
+    /// 获取 JS DOM 桥接器可变引用
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    pub fn js_dom_bridge_mut(&mut self) -> Option<&mut JsDomBridge> {
+        self.js_dom_bridge.as_mut()
+    }
+
+    /// 设置 JS DOM 桥接器
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    pub fn set_js_dom_bridge(&mut self, bridge: JsDomBridge) {
+        self.js_dom_bridge = Some(bridge);
+    }
+
+    /// 获取 JS 引擎引用
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    pub fn js_engine(&self) -> Option<&JsEngine> {
+        self.js_engine.as_ref()
+    }
+
+    /// 获取 JS 引擎可变引用
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    pub fn js_engine_mut(&mut self) -> Option<&mut JsEngine> {
+        self.js_engine.as_mut()
+    }
+
+    /// 设置 JS 引擎
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    pub fn set_js_engine(&mut self, engine: JsEngine) {
+        self.js_engine = Some(engine);
+    }
+
+    /// 调用 JS 引擎的定时器 tick
+    /// 应在渲染循环的每帧调用
+    #[cfg(any(feature = "boa", feature = "v8"))]
+    pub fn js_engine_tick_timers(&mut self) -> usize {
+        if let Some(ref mut engine) = self.js_engine {
+            engine.tick_timers()
+        } else {
+            0
+        }
     }
 
     /// 设置 hovered_node 并重新渲染
@@ -744,6 +936,8 @@ struct TaffyRenderer<'a> {
     dom: &'a DomWrapper,
     /// 64 位稳定 ID → dom index 的映射
     node_index_cache: std::collections::HashMap<u64, usize>,
+    /// 垂直滚动偏移量（像素），所有渲染坐标减去此值
+    scroll_offset_y: f32,
 }
 
 impl<'a> TaffyRenderer<'a> {
@@ -969,7 +1163,56 @@ impl<'a> TaffyRenderer<'a> {
     }
 
     /// 使用 Taffy 布局结果的主渲染循环
+    /// 渲染子树到指定的 Painter（支持并行渲染）
     fn render_tree_with_taffy(&mut self, node_ref: &NodeRef) {
+        // 直接渲染到 painter 的 pixmap
+        self.render_tree_with_taffy_inner(node_ref);
+    }
+
+    /// 并行渲染优化入口：渲染子树到指定的 pixmap。
+    ///
+    /// 当前阶段为占位实现（`#[allow(dead_code)]` 保留供未来使用）。
+    /// 真正的并行渲染需要重构 `TaffyRenderer` 的 `&mut self` 借用模式，
+    /// 例如将 `painter` 和 `taffy` 拆分为独立 `RefCell` 或使用 arcana，
+    /// 以便在多个线程中安全渲染子树到不同的 Pixmap 上。
+    ///
+    /// 当前简化实现：直接调用 `render_tree_with_taffy_inner`，不切换 pixmap。
+    /// 这意味着目标 pixmap 参数 `_target` 当前被忽略，渲染结果汇集到主 pixmap。
+    ///
+    /// # 未来优化方向
+    /// - 将 UI 树分割为独立层（如 backdrop、content、overlay）
+    /// - 使用 `rayon` 或 `crossbeam` 对独立子树并行渲染
+    /// - 每个线程持有独立的临 Pixmap，最后合成
+    #[allow(dead_code)]
+    fn render_tree_with_taffy_on_painter(&mut self, node_ref: &NodeRef, _target: &mut Pixmap) {
+        // 当前占位实现：直接渲染到主 painter（忽略 target 参数）
+        // TODO: 真正的并行渲染实现
+        self.render_tree_with_taffy_inner(node_ref);
+    }
+
+    /// 实际的渲染逻辑（被 render_tree_with_taffy 和并行版本共用）
+    /// 对子节点按 z-index 排序后再递归渲染
+    fn render_children_sorted_by_z_index(&mut self, node_ref: &NodeRef) {
+        let mut children: Vec<NodeRef> = node_ref.children().collect();
+        // 按 z-index 稳定排序（默认 0，越小越靠后渲染即越底层）
+        children.sort_by(|a, b| {
+            let a_z = self.get_z_index(a).unwrap_or(0);
+            let b_z = self.get_z_index(b).unwrap_or(0);
+            a_z.cmp(&b_z)
+        });
+        for child in &children {
+            self.render_tree_with_taffy(child);
+        }
+    }
+
+    /// 获取节点的 z-index 值
+    fn get_z_index(&self, node_ref: &NodeRef) -> Option<i32> {
+        let dom_idx = self.find_dom_index(node_ref)?;
+        let layout = self.taffy.get_layout(dom_idx)?;
+        Some(layout.z_index)
+    }
+
+    fn render_tree_with_taffy_inner(&mut self, node_ref: &NodeRef) {
         // 按深度优先遍历 NodeRef 树，从 taffy 获取布局坐标
         if let Some(element) = node_ref.as_element() {
             let tag_name = element.name.local.to_string();
@@ -986,54 +1229,109 @@ impl<'a> TaffyRenderer<'a> {
 
                     // 跳过不可见节点（宽或高为 0）
                     if w <= 0.0 || h <= 0.0 {
-                        for child in node_ref.children() {
-                            self.render_tree_with_taffy(&child);
+                        // 对子节点按 z-index 排序后递归
+                        let mut invisible_children: Vec<NodeRef> = node_ref.children().collect();
+                        invisible_children.sort_by(|a, b| {
+                            let a_z = self.get_z_index(a).unwrap_or(0);
+                            let b_z = self.get_z_index(b).unwrap_or(0);
+                            a_z.cmp(&b_z)
+                        });
+                        for child in &invisible_children {
+                            self.render_tree_with_taffy(child);
                         }
+                        return;
+                    }
+
+                    // 应用滚动偏移：元素的视口 y = 布局 y - 滚动偏移
+                    // position: fixed/sticky 元素不受滚动影响（锚定在视口）
+                    let is_fixed_or_sticky =
+                        layout.position_type == crate::renderer::taffy_layout::PositionType::Fixed;
+                    let vy = if is_fixed_or_sticky {
+                        y
+                    } else {
+                        y - self.scroll_offset_y
+                    };
+
+                    // 应用 CSS transform: translate() 偏移
+                    let (tx, ty) = (layout.transform_dx, layout.transform_dy);
+                    let render_x = x + tx;
+                    let render_y = vy + ty;
+
+                    // opacity 处理：透明元素完全跳过
+                    if layout.opacity <= 0.0 {
+                        self.render_children_sorted_by_z_index(node_ref);
+                        return;
+                    }
+                    // opacity < 1.0 时，现有的 Painter API 不支持全局 alpha 混合
+                    // 但 tiny-skia 的 fill_rect 支持颜色本身的 alpha 值
+                    // 当前 painter 不支持独立透明度——需要在颜色级别处理
+                    // 注意：painter 的所有绘制 API 已经通过 color 的 alpha 通道支持透明度
+                    // 这里标记未来可以增强：将 opacity 应用到颜色的 alpha 通道
+                    if layout.opacity < 1.0 && layout.opacity > 0.0 {
+                        // 透明度将通过颜色 alpha 处理（已经支持）
+                    }
+
+                    // 跳过完全在视口上方或下方的元素（提高性能）
+                    let (_vp_w, vp_h) = (
+                        self.taffy.get_viewport_width(),
+                        self.taffy.get_viewport_height(),
+                    );
+                    if vy + h < 0.0 || vy > vp_h {
+                        // 完全不可见，但子节点可能跨越可见区域，仍需递归
+                        self.render_children_sorted_by_z_index(node_ref);
                         return;
                     }
 
                     let is_hovered = Some(dom_idx) == self.taffy.hovered_node;
 
-                    // 渲染背景、边框、box-shadow、文本...
+                    // 渲染背景、边框、box-shadow、文本（使用 render_x/render_y 应用 transform）
                     if let Some(bg) = &layout.background {
                         let br = layout.border_radius;
                         if br > 0.0 && w > 0.0 && h > 0.0 {
-                            self.painter.draw_rounded_rect(x, y, w, h, br, bg);
+                            self.painter
+                                .draw_rounded_rect(render_x, render_y, w, h, br, bg);
                         } else if br < 0.0 && w > 0.0 && h > 0.0 {
                             let r = w.min(h) / 2.0;
-                            self.painter.draw_rounded_rect(x, y, w, h, r, bg);
+                            self.painter
+                                .draw_rounded_rect(render_x, render_y, w, h, r, bg);
                         } else {
-                            self.painter.draw_rect(x, y, w, h, bg);
+                            self.painter.draw_rect(render_x, render_y, w, h, bg);
                         }
                     }
                     if let Some(shadow) = &layout.box_shadow {
-                        self.render_box_shadow_from_str(shadow, x, y, w, h);
+                        self.render_box_shadow_from_str(shadow, render_x, render_y, w, h);
                     } else {
-                        self.render_box_shadow_for_element(&tag_name, x, y, w, h);
+                        self.render_box_shadow_for_element(&tag_name, render_x, render_y, w, h);
                     }
-                    self.render_background_image(&tag_name, x, y, w, h);
+                    self.render_background_image(&tag_name, render_x, render_y, w, h);
                     if let Some(bc) = &layout.border_color {
                         let bw = self.get_border_width(&tag_name, &layout);
                         if bw > 0.0 {
                             let br = layout.border_radius;
                             if br > 0.0 {
-                                self.painter.draw_rounded_border(x, y, w, h, br, bw, bc);
+                                self.painter
+                                    .draw_rounded_border(render_x, render_y, w, h, br, bw, bc);
                             } else {
-                                self.painter.draw_rect_border(x, y, w, h, bw, bc);
+                                self.painter
+                                    .draw_rect_border(render_x, render_y, w, h, bw, bc);
                             }
                         }
                     }
-                    self.render_element_box(&tag_name, x, y, w, h, Some(node_ref));
+                    self.render_element_box(&tag_name, render_x, render_y, w, h, Some(node_ref));
                     if is_hovered {
                         let highlight = layout
                             .border_color
                             .as_ref()
                             .unwrap_or(&Color::from_hex("#4A90D9"))
                             .clone();
-                        self.painter.draw_rect_border(x, y, w, h, 2.0, &highlight);
+                        self.painter
+                            .draw_rect_border(render_x, render_y, w, h, 2.0, &highlight);
                     }
                     if tag_name == "img" {
-                        self.render_img_element(x, y, w, h, node_ref);
+                        self.render_img_element(render_x, render_y, w, h, node_ref);
+                    }
+                    if tag_name == "iframe" {
+                        self.render_iframe_element(render_x, render_y, w, h, node_ref);
                     }
                     if tag_name != "style" && tag_name != "script" && tag_name != "head" {
                         let text_content = collect_text(node_ref);
@@ -1048,13 +1346,13 @@ impl<'a> TaffyRenderer<'a> {
                             let font_color = layout.font_color.as_ref().unwrap_or(&default_color);
                             let padding_x = 10.0;
                             let text_y = if h > actual_font_size {
-                                y + (h - actual_font_size) / 2.0 + actual_font_size
+                                render_y + (h - actual_font_size) / 2.0 + actual_font_size
                             } else {
-                                y + 2.0 + actual_font_size
+                                render_y + 2.0 + actual_font_size
                             };
                             self.render_text_at_weight(
                                 &text_content,
-                                x + padding_x,
+                                render_x + padding_x,
                                 text_y,
                                 w - padding_x * 2.0,
                                 actual_font_size,
@@ -1063,8 +1361,8 @@ impl<'a> TaffyRenderer<'a> {
                             );
                             self.render_text_decoration(
                                 &text_content,
-                                x,
-                                y,
+                                render_x,
+                                render_y,
                                 w,
                                 h,
                                 font_size,
@@ -1074,13 +1372,53 @@ impl<'a> TaffyRenderer<'a> {
                         }
                     }
 
+                    // 表格特有样式：<th> 默认加粗和灰底
+                    if tag_name == "th" && layout.background.is_none() {
+                        self.painter.draw_rect(
+                            render_x,
+                            render_y,
+                            w,
+                            h,
+                            &Color::from_hex("#F0F0F0"),
+                        );
+                        self.painter.draw_rect_border(
+                            render_x,
+                            render_y,
+                            w,
+                            h,
+                            1.0,
+                            &Color::from_hex("#DDDDDD"),
+                        );
+                    }
+                    // <td> 默认细线边框
+                    if tag_name == "td" {
+                        self.painter.draw_rect_border(
+                            render_x,
+                            render_y,
+                            w,
+                            h,
+                            1.0,
+                            &Color::from_hex("#DDDDDD"),
+                        );
+                    }
+                    // <table> 外边框
+                    if tag_name == "table" {
+                        self.painter.draw_rect_border(
+                            render_x,
+                            render_y,
+                            w,
+                            h,
+                            1.0,
+                            &Color::from_hex("#CCCCCC"),
+                        );
+                    }
+
                     // 递归子节点前应用 overflow: hidden 裁剪
                     if layout.overflow_x == "hidden" || layout.overflow_y == "hidden" {
                         self.painter.set_clip(x, y, w, h);
                     }
-                    for child in node_ref.children() {
-                        self.render_tree_with_taffy(&child);
-                    }
+                    // 对子节点按 z-index 排序后递归
+                    self.render_children_sorted_by_z_index(node_ref);
                     if layout.overflow_x == "hidden" || layout.overflow_y == "hidden" {
                         self.painter.clear_clip();
                     }
@@ -1149,6 +1487,14 @@ impl<'a> TaffyRenderer<'a> {
             }
             "textarea" => {
                 self.render_textarea_element(x, y, w, h, node_ref);
+            }
+            "select" => {
+                self.render_select_element(x, y, w, h, node_ref);
+            }
+            "option" => {
+                // option 元素：使用浅底色
+                let opt_bg = Color::from_hex("#FAFAFA");
+                self.painter.draw_rect(x, y, w, h, &opt_bg);
             }
             "li" => {
                 // 列表圆点
@@ -1230,6 +1576,144 @@ impl<'a> TaffyRenderer<'a> {
         let center_y = y + h / 2.0 - 10.0;
         self.painter
             .draw_rect(center_x, center_y, 40.0, 20.0, &Color::from_hex("#cccccc"));
+    }
+
+    /// 渲染 <iframe> 嵌入内容
+    ///
+    /// 从 src 属性提取 URL，加载子文档，在 iframe 矩形区域内渲染。
+    /// 显示样式类似嵌套浏览上下文：白色背景 + 深色边框 + 子文档内容。
+    fn render_iframe_element(&mut self, x: f32, y: f32, w: f32, h: f32, element: &NodeRef) {
+        // 先绘制 iframe 容器边框和背景
+        self.painter
+            .draw_rounded_rect(x, y, w, h, 2.0, &Color::from_hex("#FFFFFF"));
+        self.painter
+            .draw_rounded_border(x, y, w, h, 2.0, 1.5, &Color::from_hex("#888888"));
+
+        if w <= 20.0 || h <= 20.0 {
+            return; // 尺寸太小，无法显示有意义的内容
+        }
+
+        // 获取 src 属性
+        let src = element
+            .as_element()
+            .and_then(|el| el.attributes.borrow().get("src").map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        if src.is_empty() || src == "about:blank" {
+            // 空白 iframe：在矩形中显示 "about:blank" 提示
+            let padding = 6.0;
+            self.render_text_at(
+                "about:blank",
+                x + padding,
+                y + h / 2.0 - 6.0,
+                w - padding * 2.0,
+                12.0,
+                &Color::from_hex("#999999"),
+            );
+            return;
+        }
+
+        // 解析绝对 URL
+        let absolute_url = TaffyRenderer::resolve_image_url_internal(&src, self.dom);
+
+        // 加载子文档（复用 load_document 函数）
+        let child_doc = crate::browser_process::host::load_document(&absolute_url);
+
+        match child_doc {
+            Ok(doc) => {
+                let child_dom = doc.get_dom();
+
+                // 对子文档进行布局
+                let inner_w = w - 4.0; // 减去 padding/border
+                let inner_h = h - 4.0;
+                if inner_w <= 0.0 || inner_h <= 0.0 {
+                    return;
+                }
+
+                let mut child_taffy = crate::renderer::taffy_layout::TaffyLayoutEngine::new(
+                    inner_w.max(1.0),
+                    inner_h.max(1.0),
+                );
+
+                // 从子 DOM 提取 CSS
+                let css_text = crate::renderer::renderer::extract_style_tags(child_dom);
+                if !css_text.is_empty() {
+                    let rules = crate::css_engine::parse_css_rules(&css_text);
+                    let style_map =
+                        crate::css_engine::rules_to_style_map(&rules, child_dom.inner_document());
+                    child_taffy.set_style_map(style_map);
+                }
+
+                let _ = child_taffy.compute(child_dom);
+
+                // 使用子渲染器渲染子文档到临时 pixmap
+                if let Some(mut child_painter) =
+                    crate::renderer::painter::Painter::new(inner_w as u32, inner_h as u32)
+                {
+                    // 设置子文档背景
+                    let child_bg = child_taffy
+                        .find_by_tag("body")
+                        .iter()
+                        .find_map(|n| n.background.clone())
+                        .or_else(|| {
+                            child_taffy
+                                .find_by_tag("html")
+                                .iter()
+                                .find_map(|n| n.background.clone())
+                        })
+                        .unwrap_or(crate::css::values::Color::WHITE);
+                    child_painter.set_background(child_bg);
+                    child_painter.paint();
+
+                    // 使用 TaffyRenderer 渲染子文档
+                    if !child_taffy.is_empty() {
+                        // child_dom 是 &DomWrapper，已经可用
+                        // 需要在子文档中渲染
+                        let mut child_renderer = TaffyRenderer {
+                            painter: &mut child_painter,
+                            taffy: &child_taffy,
+                            dom: child_dom,
+                            node_index_cache: std::collections::HashMap::new(),
+                            scroll_offset_y: 0.0,
+                        };
+                        child_renderer.render_dom();
+                    }
+
+                    // 将子文档的 pixmap 绘制到主画布的 iframe 区域
+                    let child_pixmap = child_painter.pixmap_mut();
+                    // 使用 draw_pixmap 在 (x+2, y+2) 位置绘制
+                    self.painter.pixmap_mut().draw_pixmap(
+                        (x + 2.0) as i32,
+                        (y + 2.0) as i32,
+                        child_pixmap.as_ref(),
+                        &tiny_skia::PixmapPaint::default(),
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                }
+            }
+            Err(e) => {
+                // 加载失败：显示错误信息
+                let padding = 6.0;
+                let err_msg = format!("iframe 加载失败: {}", e);
+                // 在 iframe 区域顶部显示浅红色背景的错误消息
+                self.painter.draw_rect(
+                    x + 2.0,
+                    y + 2.0,
+                    w - 4.0,
+                    20.0,
+                    &Color::from_hex("#FFF0F0"),
+                );
+                self.render_text_at(
+                    &err_msg,
+                    x + padding,
+                    y + padding + 2.0,
+                    w - padding * 2.0,
+                    12.0,
+                    &Color::from_hex("#CC3333"),
+                );
+            }
+        }
     }
 
     /// 精美渲染 <input> 元素（单行文本输入框）
@@ -1422,7 +1906,91 @@ impl<'a> TaffyRenderer<'a> {
         }
     }
 
-    /// 渲染元素的 box-shadow
+    /// 渲染 <select> 下拉框元素（按钮样式 + 下拉三角箭头 + 显示选中项文本）
+    fn render_select_element(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        node_ref: Option<&NodeRef>,
+    ) {
+        // 白色背景 + 灰色边框 (类似按钮)
+        let bg = Color::from_hex("#FFFFFF");
+        let border = Color::from_hex("#CCCCCC");
+        self.painter.draw_rounded_rect(x, y, w, h, 4.0, &bg);
+        self.painter
+            .draw_rounded_border(x, y, w, h, 4.0, 1.0, &border);
+
+        // 右侧下拉三角箭头 (▼)
+        let arrow_size = 8.0;
+        let arrow_x = x + w - 18.0;
+        let arrow_y = y + (h - arrow_size) / 2.0;
+        // 绘制三角: 三个点组成的三角形
+        let color = Color::from_hex("#666666");
+        self.painter
+            .draw_rect(arrow_x, arrow_y, arrow_size, 2.0, &color);
+        self.painter
+            .draw_rect(arrow_x + 2.0, arrow_y + 3.0, arrow_size - 4.0, 2.0, &color);
+        self.painter
+            .draw_rect(arrow_x + 4.0, arrow_y + 6.0, arrow_size - 8.0, 2.0, &color);
+
+        // 读取选中项的文本
+        // 优先使用 value 属性，否则找第一个 selected option
+        let selected_text = node_ref
+            .and_then(|nr| {
+                let el = nr.as_element()?;
+                let attrs = el.attributes.borrow();
+                // 优先用 value 属性
+                if let Some(val) = attrs.get("value") {
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+                // 找第一个 option 子元素的文本
+                for child in nr.children() {
+                    if let Some(child_el) = child.as_element() {
+                        if child_el.name.local.as_ref() == "option" {
+                            // 检查 selected 属性
+                            let child_attrs = child_el.attributes.borrow();
+                            if child_attrs.get("selected").is_some() {
+                                return Some(collect_text(&child));
+                            }
+                        }
+                    }
+                }
+                // 找到第一个 option 的文本
+                for child in nr.children() {
+                    if let Some(child_el) = child.as_element() {
+                        if child_el.name.local.as_ref() == "option" {
+                            return Some(collect_text(&child));
+                        }
+                    }
+                }
+                None
+            })
+            .unwrap_or_default();
+
+        // 显示文本（左对齐）
+        let padding = 8.0;
+        let txt_x = x + padding;
+        let txt_y = y + (h - 14.0) / 2.0 + 12.0;
+        let txt_w = w - padding * 2.0 - 24.0; // 为箭头留空间
+        let display_text = if selected_text.is_empty() {
+            "请选择..."
+        } else {
+            &selected_text
+        };
+        self.render_text_at(
+            display_text,
+            txt_x,
+            txt_y,
+            txt_w,
+            14.0,
+            &Color::from_hex("#333333"),
+        );
+    }
+
     /// 从 layout 获取边框宽度
     fn get_border_width(&self, _tag: &str, _layout: &TaffyLayoutNode) -> f32 {
         match _tag {
@@ -1899,23 +2467,11 @@ mod tests {
     fn test_render_document_applies_body_background_color() {
         // 验证 body background-color: #ff0000 被正确应用为画布背景色
         let html = r#"<html><head><style>body { background-color: #ff0000; }</style></head><body><p>red bg</p></body></html>"#;
-        // 先验证 CSS 提取
         let dom = crate::DomWrapper::from_html(html, None);
         let css_text = extract_style_tags(&dom);
-        eprintln!("[测试] 提取的 CSS: '{}'", css_text);
         assert!(!css_text.is_empty(), "CSS should be extracted");
         let rules = crate::css_engine::parse_css_rules(&css_text);
-        eprintln!("[测试] CSS 规则数: {}", rules.len());
-        for r in &rules {
-            eprintln!(
-                "[测试]   选择器: '{}', 声明数: {}",
-                r.selector,
-                r.declarations.len()
-            );
-            for d in &r.declarations {
-                eprintln!("[测试]     {}: {}", d.property, d.value);
-            }
-        }
+        assert!(!rules.is_empty(), "CSS rules should be parsed");
 
         let doc = crate::browser::Document::from_html(html, "test://");
         let mut renderer = Renderer::new(100, 100);

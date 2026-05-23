@@ -18,7 +18,7 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     /// 全局默认 Cookie 存储（Arc 共享）
-    static ref GLOBAL_COOKIE_JAR: SharedCookieJar =
+    pub static ref GLOBAL_COOKIE_JAR: SharedCookieJar =
         std::sync::Arc::new(Mutex::new(HashMap::new()));
 
     /// 全局 Referer 栈（用于导航历史）
@@ -60,19 +60,20 @@ pub enum NetworkError {
 
 /// Cookie 条目，符合 RFC 6265 规范
 #[derive(Clone, Debug)]
-struct CookieEntry {
-    name: String,
-    value: String,
-    domain: String,
-    path: String,
-    secure: bool,
-    http_only: bool,
-    expires: Option<Instant>,
+#[allow(dead_code)]
+pub struct CookieEntry {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub expires: Option<Instant>,
 }
 
 impl CookieEntry {
     /// 检查 cookie 是否已过期
-    fn is_expired(&self) -> bool {
+    pub fn is_expired(&self) -> bool {
         self.expires.map_or(false, |exp| Instant::now() > exp)
     }
 }
@@ -336,111 +337,33 @@ impl NetworkClient {
         }
     }
 
-    /// 解析 HTTP Date（Expires 属性），仅支持常见格式
+    /// 解析 HTTP Date（Expires 属性）
+    ///
+    /// 使用 `httpdate` crate 解析 RFC 7231 / RFC 1123 / RFC 850 / ANSI C 格式。
     fn parse_expires(val: &str) -> Option<Instant> {
-        // 尝试解析几种常见的 HTTP 日期格式
-        // 简单处理：使用系统时间解析
         let val = val.trim();
-        // RFC 1123: "EEE, dd MMM yyyy HH:mm:ss GMT"
-        // RFC 850: "EEEE, dd-MMM-yy HH:mm:ss GMT"
-        // ANSI C: "EEE MMM dd HH:mm:ss yyyy"
-        // 由于标准库没有直接的 HTTP date 解析，使用 httpdate 或自行解析
-        // 这里用简易方式：尝试用 chrono 解析，但为避免新增依赖，使用自定义简化版。
-        // 实际项目中建议使用 `httpdate` crate（已间接通过 reqwest 依赖）。
-        // 这里利用 reqwest 内部的 httpdate（通过 http 包）或手动解析。
-        // 简易：使用 `humantime` 或手动实现。此处直接保存原始字符串并在获取时比较。
-        // 简化实现：只支持常见的 RFC 1123 格式
-        Self::parse_http_date(val)
-    }
-
-    /// 简易 HTTP 日期解析（RFC 1123 / RFC 850 / ANSI C）
-    fn parse_http_date(val: &str) -> Option<Instant> {
-        // 当前已知的有效 HTTP 日期格式：
-        // "Thu, 01 Dec 2050 16:00:00 GMT" — RFC 1123
-        // 简易实现：仅支持已知格式，否则忽略过期时间
-        // 使用 `httpdate` 更好，但为避免新增依赖，用正则简易匹配
-        let months = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-
-        let val = val.trim().trim_end_matches("GMT").trim();
-        // 尝试解析 "DD MMM YYYY HH:MM:SS" 部分
-        let parts: Vec<&str> = val.split(|c: char| c == ' ' || c == ',').collect();
-        let parts: Vec<&str> = parts.into_iter().filter(|s| !s.is_empty()).collect();
-
-        // 期望格式中有日期部分
-        let (day_str, month_str, year_str, time_str) = if parts.len() >= 4 {
-            // 跳过 weekday, 找数字日、月、年
-            // 找到数字日（1-31）
-            let day_part = parts
-                .iter()
-                .find(|p| p.parse::<u32>().is_ok() && p.len() <= 2)?;
-            let idx = parts.iter().position(|p| *p == *day_part)?;
-            let day = day_part;
-            let month = parts.get(idx + 1)?;
-            let year = parts.get(idx + 2)?;
-            let time = parts.get(idx + 3)?;
-            (day, *month, *year, *time)
-        } else if parts.len() >= 4 {
-            // ANSI C: "EEE MMM DD HH:MM:SS YYYY"
-            let day = parts.get(2)?;
-            let month = parts.get(1)?;
-            let year = parts.get(4)?;
-            let time = parts.get(3)?;
-            (day, *month, *year, *time)
-        } else {
-            return None;
-        };
-
-        let day: u32 = day_str.parse().ok()?;
-        let month_idx = months
-            .iter()
-            .position(|m| m.eq_ignore_ascii_case(month_str))? as u32
-            + 1;
-        let year: u32 = year_str.parse().ok()?;
-
-        let time_parts: Vec<&str> = time_str.split(':').collect();
-        if time_parts.len() != 3 {
-            return None;
+        // httpdate::parse_http_date 返回 std::time::SystemTime
+        match httpdate::parse_http_date(val) {
+            Ok(system_time) => {
+                // 将 SystemTime 转换为 Instant
+                let now_sys = std::time::SystemTime::now();
+                let now_inst = Instant::now();
+                match system_time.duration_since(now_sys) {
+                    Ok(dur) => Some(now_inst + dur),
+                    Err(e) => {
+                        // system_time 早于 now_sys，说明已过期
+                        let past = e.duration();
+                        if past <= now_inst.elapsed() {
+                            Some(now_inst - past)
+                        } else {
+                            // 极端情况：回退到 epoch
+                            None
+                        }
+                    }
+                }
+            }
+            Err(_) => None,
         }
-        let hour: u32 = time_parts[0].parse().ok()?;
-        let min: u32 = time_parts[1].parse().ok()?;
-        let sec: u32 = time_parts[2].parse().ok()?;
-
-        // 使用简单时间计算（忽略时区，假设 GMT）
-        // 用 Duration 近似计算 Unix timestamp
-        let days_since_epoch = Self::days_from_ymd(year, month_idx, day);
-        let total_secs =
-            days_since_epoch as u64 * 86400 + hour as u64 * 3600 + min as u64 * 60 + sec as u64;
-
-        let unix_epoch = Instant::now()
-            - Duration::from_secs(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            );
-
-        Some(unix_epoch + Duration::from_secs(total_secs))
-    }
-
-    /// 从年、月、日计算距 UNIX 纪元的天数
-    fn days_from_ymd(year: u32, month: u32, day: u32) -> i64 {
-        let y = year as i64;
-        let m = month as i64;
-        let d = day as i64;
-
-        // 将 1 月、2 月视为前一年的 13 月、14 月
-        let (y_adj, m_adj) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
-
-        // 格里历公式
-        let era = if y_adj >= 0 { y_adj } else { y_adj - 399 };
-        let era_y = y_adj - era * 400;
-        let yoe = if era_y > 0 { era_y - 1 } else { era_y };
-        let doy = (153 * (m_adj - 3) + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-
-        era * 146097 + doe - 719468
     }
 
     // ── Referer ──
@@ -516,6 +439,28 @@ impl NetworkClient {
                 }
                 r
             }
+            reqwest::Method::PUT => {
+                let mut r = client.put(url);
+                if let Some(body) = body_option {
+                    r = r.body(body);
+                }
+                if let Some(ct) = content_type {
+                    r = r.header("Content-Type", ct);
+                }
+                r
+            }
+            reqwest::Method::DELETE => client.delete(url),
+            reqwest::Method::PATCH => {
+                let mut r = client.patch(url);
+                if let Some(body) = body_option {
+                    r = r.body(body);
+                }
+                if let Some(ct) = content_type {
+                    r = r.header("Content-Type", ct);
+                }
+                r
+            }
+            reqwest::Method::HEAD => client.head(url),
             _ => {
                 return Err(NetworkError::RequestFailed(format!(
                     "不支持的 HTTP 方法: {:?}",
